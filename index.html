@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Embodied Relationship Agent Demo</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Serif+SC:wght@600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css?v=investor-stage-1" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero panel">
+        <div class="hero-copy">
+          <p class="eyebrow">Presence · Perception · Timing · Memory</p>
+          <h1>一个会判断“该不该出现”的 embodied relationship agent</h1>
+          <p class="lead">摄像头和麦克风不是为了多采数据，而是把连续信号转化为关系记忆、低打扰主动性和可解释的陪伴时机。</p>
+          <div class="hero-actions">
+            <button id="startButton" class="primary">启动感知 demo</button>
+            <button id="cameraOnlyButton" class="ghost">只测试摄像头</button>
+            <button id="quietButton" class="ghost">我想安静 10 分钟</button>
+          </div>
+        </div>
+        <div class="robot-stage" aria-label="robot presence visualization">
+          <div class="ambient-ring"></div>
+          <div id="robot" class="robot attentive">
+            <div class="antenna"></div>
+            <div class="face">
+              <span class="eye left"></span>
+              <span class="eye right"></span>
+              <span id="mouth" class="mouth"></span>
+            </div>
+            <div class="body-core">
+              <span></span><span></span><span></span>
+            </div>
+          </div>
+          <div id="robotStatus" class="robot-status">待机：等待用户允许观察</div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="panel perception-card">
+          <div class="section-title">
+            <span>01</span>
+            <div>
+              <h2>连续多模态感知</h2>
+              <p>本地从视频亮度/运动和音频能量推断状态，不上传原始媒体。</p>
+            </div>
+          </div>
+          <div class="video-wrap">
+            <video id="video" autoplay playsinline muted></video>
+            <canvas id="faceOverlay" width="640" height="360"></canvas>
+            <canvas id="analysisCanvas" width="160" height="90"></canvas>
+            <div id="privacyBadge" class="privacy-badge muted">camera/mic off</div>
+            <div id="cameraDebug" class="camera-debug">点击“启动感知 demo”后请求摄像头权限</div>
+            <div id="faceHud" class="face-hud">Face model: idle</div>
+          </div>
+          <div class="signal-grid">
+            <div>
+              <label>Presence</label>
+              <meter id="presenceMeter" min="0" max="100" value="0"></meter>
+              <strong id="presenceText">未知</strong>
+            </div>
+            <div>
+              <label>Voice energy</label>
+              <meter id="voiceMeter" min="0" max="100" value="0"></meter>
+              <strong id="voiceText">0%</strong>
+            </div>
+            <div>
+              <label>Motion</label>
+              <meter id="motionMeter" min="0" max="100" value="0"></meter>
+              <strong id="motionText">0%</strong>
+            </div>
+            <div>
+              <label>Light / fatigue cue</label>
+              <meter id="lightMeter" min="0" max="100" value="0"></meter>
+              <strong id="lightText">0%</strong>
+            </div>
+            <div>
+              <label>Gaze / face</label>
+              <meter id="gazeMeter" min="0" max="100" value="0"></meter>
+              <strong id="gazeText">未校准</strong>
+            </div>
+            <div>
+              <label>Posture stability</label>
+              <meter id="postureMeter" min="0" max="100" value="0"></meter>
+              <strong id="postureText">未校准</strong>
+            </div>
+            <div>
+              <label>Smile</label>
+              <meter id="smileMeter" min="0" max="100" value="0"></meter>
+              <strong id="smileText">未检测</strong>
+            </div>
+            <div>
+              <label>Brow tension</label>
+              <meter id="browMeter" min="0" max="100" value="0"></meter>
+              <strong id="browText">未检测</strong>
+            </div>
+            <div>
+              <label>Eye openness</label>
+              <meter id="eyeMeter" min="0" max="100" value="0"></meter>
+              <strong id="eyeText">未检测</strong>
+            </div>
+            <div>
+              <label>Mouth openness</label>
+              <meter id="mouthMeter" min="0" max="100" value="0"></meter>
+              <strong id="mouthText">未检测</strong>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel blendshape-card">
+          <div class="section-title">
+            <span>08</span>
+            <div>
+              <h2>实时人脸字段</h2>
+              <p>MediaPipe FaceLandmarker 输出 blendshapes；这里显示最高的字段和分数，不把它们直接等同于情绪。</p>
+            </div>
+          </div>
+          <div id="blendshapeList" class="blendshape-list"></div>
+        </article>
+
+        <article class="panel scene-card">
+          <div class="section-title">
+            <span>09</span>
+            <div>
+              <h2>低频场景理解</h2>
+              <p>每隔几秒抽帧给 VLM，总结人在做什么、和哪些物体交互、是否适合打断。</p>
+            </div>
+          </div>
+          <div id="sceneStatus" class="scene-status">等待摄像头启动</div>
+          <div id="sceneSummary" class="scene-summary"></div>
+        </article>
+
+        <article class="panel scene-memory-card">
+          <div class="section-title">
+            <span>10</span>
+            <div>
+              <h2>持续场景记忆图</h2>
+              <p>把每次 VLM 的新观察合并成稳定的人、物品、所属关系和交互事件，而不是每轮重置。</p>
+            </div>
+          </div>
+          <div id="sceneMemory" class="scene-memory"></div>
+        </article>
+
+        <article class="panel state-card">
+          <div class="section-title">
+            <span>02</span>
+            <div>
+              <h2>互动状态，而不是情绪诊断</h2>
+              <p>输出 readiness、arousal、energy 和 quiet need，用于判断是否该出现。</p>
+            </div>
+          </div>
+          <div class="state-orbit">
+            <div id="stateCore" class="state-core">observing</div>
+          </div>
+          <div class="state-list" id="stateList"></div>
+        </article>
+
+        <article class="panel memory-card">
+          <div class="section-title">
+            <span>03</span>
+            <div>
+              <h2>关系记忆</h2>
+              <p>用户可见、可编辑、可删除。demo 使用 localStorage。</p>
+            </div>
+          </div>
+          <form id="memoryForm" class="memory-form">
+            <input id="memoryInput" placeholder="例如：我压力大时不喜欢被追问原因" />
+            <button type="submit">记住</button>
+          </form>
+          <div id="memoryList" class="memory-list"></div>
+        </article>
+
+        <article class="panel strategy-card">
+          <div class="section-title">
+            <span>04</span>
+            <div>
+              <h2>主动性策略层</h2>
+              <p>判断时机、介入强度、退出条件，而不是频繁说话。</p>
+            </div>
+          </div>
+          <div id="intervention" class="intervention">
+            <small>当前策略</small>
+            <h3>观察中，不打扰</h3>
+            <p>还没有足够上下文。机器人保持在场，但不主动开启长对话。</p>
+          </div>
+          <div class="control-row">
+            <button data-feedback="good">这次很体贴</button>
+            <button data-feedback="bad">这次太打扰</button>
+            <button data-feedback="silent">别主动找我</button>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel timeline-panel">
+        <div class="section-title">
+          <span>05</span>
+          <div>
+            <h2>可解释的关系时间线</h2>
+            <p>每次主动行为都说明“为什么现在”。这比人格花哨更重要。</p>
+          </div>
+        </div>
+        <div id="timeline" class="timeline"></div>
+      </section>
+
+      <section class="panel conversation-panel">
+        <div class="section-title">
+          <span>06</span>
+          <div>
+            <h2>实时陪伴对话</h2>
+            <p>浏览器 ASR 听你说话，LLM 结合状态和记忆回复；无密钥时自动使用本地策略回复。</p>
+          </div>
+        </div>
+        <div id="conversation" class="conversation"></div>
+        <div class="composer">
+          <button id="listenButton" class="primary" type="button">开始听我说</button>
+          <input id="chatInput" placeholder="或者直接输入一句话，例如：我今天有点累" />
+          <button id="sendButton" type="button">发送</button>
+          <button id="speakToggle" class="ghost" type="button">语音回复：开</button>
+        </div>
+        <p id="asrStatus" class="asr-status">ASR 待机。Safari 可能不支持浏览器语音识别，Chrome 效果更稳。</p>
+      </section>
+
+      <section class="panel identity-panel">
+        <div class="section-title">
+          <span>07</span>
+          <div>
+            <h2>本地人脸关系档案</h2>
+            <p>MediaPipe bbox 裁剪后走 InsightFace 注册/匹配；provider 与 top-3 候选人始终可见，fallback 不会伪装成真实识别。</p>
+          </div>
+        </div>
+        <div class="identity-grid">
+          <div class="identity-card">
+            <label>当前识别</label>
+            <strong id="activePerson">未知用户</strong>
+            <p id="personStrategy">未绑定关系档案时，只使用通用低打扰策略。</p>
+          </div>
+          <div class="identity-card">
+            <label>三路融合</label>
+            <strong id="identityFusion">explicit 0 · face 0 · voice 0</strong>
+            <p>显式选择最高优先级；face/voice 只作为“可能是谁”的弱证据。</p>
+          </div>
+          <div class="identity-card">
+            <label>Face enrollment debug</label>
+            <strong id="faceEnrollDebug">等待人脸模型</strong>
+            <p>绑定按钮会读取这里的状态；如果没有 landmarks，就不会创建人脸档案。</p>
+          </div>
+          <div class="identity-card face-match-card">
+            <label>Face match top-3</label>
+            <div id="faceMatchCandidates" class="face-match-candidates">
+              <p class="face-match-empty">等待稳定正脸与已注册样本</p>
+            </div>
+            <p>每约 2 秒用 InsightFace embedding 与本地档案比对；分数低于阈值时不自动认定身份。</p>
+          </div>
+          <p id="serverStatus" class="server-status">正在检测后端与 InsightFace…</p>
+          <form id="personForm" class="person-form">
+            <input id="personNameInput" placeholder="输入名字，例如：Alex" />
+            <button type="submit">绑定当前人脸</button>
+            <button id="enrollVoiceButton" type="button">绑定当前声纹</button>
+            <button id="clearPeopleButton" type="button" class="ghost">清空所有人物档案</button>
+          </form>
+        </div>
+        <div id="personList" class="person-list"></div>
+      </section>
+    </main>
+
+    <script src="./app.js?v=direction-a-face-5"></script>
+  </body>
+</html>
