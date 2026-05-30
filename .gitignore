@@ -5,3 +5,12 @@ __pycache__/
 .env.local
 *.log
 node_modules/
+".insightface/models/" 
+"vendor/mediapipe/models/*.task" 
+"*.wasm" 
+".insightface/models/" 
+"vendor/mediapipe/models/*.task" 
+"*.wasm" 
+".insightface/models/" 
+"vendor/mediapipe/models/*.task" 
+"*.wasm" 
