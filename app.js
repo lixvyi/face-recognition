@@ -94,6 +94,7 @@ const state = {
   enrollBusy: false,
   serverOnline: false,
   insightfaceReady: false,
+  llmConfigured: false,
   identityPython: '',
   visionPausedUntil: 0,
   activePersonId: '',
@@ -111,6 +112,7 @@ const state = {
     events: [],
     counters: { object: 0, relation: 0, event: 0 },
   },
+  pendingOwnership: null,
   sceneBusy: false,
   sceneFrames: [],
   lastSceneAt: 0,
@@ -156,6 +158,120 @@ if (!state.memories.length) {
 }
 
 migratePeople();
+migrateGraph();
+
+// ---- 实例级关系图谱（episodic / 图记忆）----
+// 关系强度与置信度模型：弱(seen_with) -> 中(uses) -> 强(frequently_uses)，并支持用户确认/否认。
+const RELATION_STRENGTHS = { weak: 0.3, medium: 0.6, strong: 0.85 };
+const INTERACTION_LABELS = {
+  holding: '拿着',
+  picking_up: '拿起',
+  putting_down: '放下',
+  using: '使用',
+  touching: '触碰',
+  looking_at: '注视',
+  near: '靠近',
+};
+const CONTACT_ACTIONS = ['holding', 'picking_up', 'putting_down', 'using', 'touching'];
+
+function migrateGraph() {
+  const mem = state.sceneMemory;
+  mem.objects = Array.isArray(mem.objects) ? mem.objects : [];
+  mem.relations = Array.isArray(mem.relations) ? mem.relations : [];
+  mem.events = Array.isArray(mem.events) ? mem.events : [];
+  mem.counters = mem.counters || { object: 0, relation: 0, event: 0 };
+  mem.objects.forEach(object => {
+    if (typeof object.visualDescription !== 'string') object.visualDescription = '';
+    if (!('bboxNorm' in object)) object.bboxNorm = null;
+    if (!('thumbnail' in object)) object.thumbnail = '';
+    if (!object.status) object.status = 'present';
+    if (typeof object.seenCount !== 'number') object.seenCount = 1;
+  });
+  mem.relations.forEach(relation => {
+    if (!relation.personId && relation.sourceId) relation.personId = relation.sourceId;
+    if (!relation.objectId && relation.targetId) relation.objectId = relation.targetId;
+    if (!relation.personName) relation.personName = '未知用户';
+    if (!relation.status) relation.status = 'hypothesis';
+    if (!relation.strength) relation.strength = 'weak';
+    if (typeof relation.interactionCount !== 'number') relation.interactionCount = 0;
+    if (typeof relation.contactCount !== 'number') relation.contactCount = 0;
+    if (typeof relation.lastAskedAt !== 'number') relation.lastAskedAt = 0;
+    if (!Array.isArray(relation.evidence)) relation.evidence = [];
+  });
+}
+
+function persistGraph() {
+  localStorage.setItem('hri-demo-scene-memory', JSON.stringify(state.sceneMemory));
+}
+
+function bboxCenter(bbox) {
+  return [bbox[0] + bbox[2] / 2, bbox[1] + bbox[3] / 2];
+}
+
+function bboxCenterDistance(a, b) {
+  const [ax, ay] = bboxCenter(a);
+  const [bx, by] = bboxCenter(b);
+  return Math.hypot(ax - bx, ay - by);
+}
+
+function descriptionSimilarity(a, b) {
+  const ta = new Set(String(a || '').toLowerCase().split(/[^a-z0-9\u4e00-\u9fa5]+/).filter(Boolean));
+  const tb = new Set(String(b || '').toLowerCase().split(/[^a-z0-9\u4e00-\u9fa5]+/).filter(Boolean));
+  if (!ta.size || !tb.size) return 0;
+  let shared = 0;
+  ta.forEach(token => { if (tb.has(token)) shared += 1; });
+  return shared / Math.max(ta.size, tb.size);
+}
+
+// 实例匹配：先用 VLM 复用的 id，再用同类别 + 空间位置 + 外观描述判断是否同一实例。
+function matchSceneObjectInstance(input) {
+  const objects = state.sceneMemory.objects;
+  if (input.id) {
+    const byId = objects.find(item => item.id === input.id);
+    if (byId) return byId;
+  }
+  const normalized = normalizeLabel(input.label);
+  const sameLabel = objects.filter(item => item.normalized === normalized);
+  if (!sameLabel.length) return null;
+  if (sameLabel.length === 1 && !input.bboxNorm) return sameLabel[0];
+  let best = null;
+  let bestScore = 0;
+  sameLabel.forEach(candidate => {
+    let score = 0.35;
+    if (input.bboxNorm && candidate.bboxNorm) {
+      const distance = bboxCenterDistance(input.bboxNorm, candidate.bboxNorm);
+      score += Math.max(0, 0.45 * (1 - distance / 0.35));
+    }
+    score += 0.2 * descriptionSimilarity(input.visualDescription, candidate.visualDescription);
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  });
+  return bestScore >= 0.55 ? best : null;
+}
+
+// 从当前视频帧按归一化 bbox 裁剪一张缩略图作为图像证据。
+function captureRegionThumbnail(bboxNorm, maxEdge = 96) {
+  if (!bboxNorm || !state.started) return '';
+  const vw = elements.video.videoWidth;
+  const vh = elements.video.videoHeight;
+  if (!vw || !vh) return '';
+  const sx = Math.round(bboxNorm[0] * vw);
+  const sy = Math.round(bboxNorm[1] * vh);
+  const sw = Math.max(8, Math.round(bboxNorm[2] * vw));
+  const sh = Math.max(8, Math.round(bboxNorm[3] * vh));
+  const scale = Math.min(1, maxEdge / Math.max(sw, sh));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(sw * scale);
+  canvas.height = Math.round(sh * scale);
+  try {
+    canvas.getContext('2d').drawImage(elements.video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.5);
+  } catch {
+    return '';
+  }
+}
 
 function newSampleId() {
   return crypto.randomUUID ? crypto.randomUUID() : `sample_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -290,6 +406,7 @@ async function pingServer() {
     const data = await response.json();
     state.serverOnline = true;
     state.insightfaceReady = Boolean(data.insightfaceReady);
+    state.llmConfigured = Boolean(data.llmConfigured);
     state.identityPython = data.python || '';
     renderServerStatus(data);
     return data;
@@ -304,17 +421,25 @@ async function pingServer() {
 function renderServerStatus(health) {
   if (!elements.serverStatus) return;
   if (!health?.ok) {
-    elements.serverStatus.textContent = '后端未连接：请先运行 node server.mjs，再打开本页';
+    elements.serverStatus.textContent = '后端未连接：请先运行 .\\start.ps1，再打开本页';
     elements.serverStatus.className = 'server-status bad';
     return;
   }
-  if (health.insightfaceReady) {
-    elements.serverStatus.textContent = `后端已连接 · InsightFace 就绪 (${health.python || 'python'})`;
-    elements.serverStatus.className = 'server-status good';
-    return;
+  const parts = [];
+  if (health.llmConfigured) {
+    parts.push(`VLM 已配置 (${health.llmModel || 'model'})`);
+  } else {
+    parts.push('VLM 未配置：编辑 .env 设置 LLM_API_KEY 后重启 start.ps1');
   }
-  elements.serverStatus.textContent = `后端已连接 · InsightFace 未就绪：${health.insightfaceDetail || '见 node 终端提示'}`;
-  elements.serverStatus.className = 'server-status warn';
+  if (health.insightfaceReady) {
+    parts.push(`InsightFace 就绪 (${health.python || 'python'})`);
+  } else {
+    parts.push(`InsightFace 未就绪：${health.insightfaceDetail || '见终端'}`);
+  }
+  elements.serverStatus.textContent = `后端已连接 · ${parts.join(' · ')}`;
+  elements.serverStatus.className = health.llmConfigured && health.insightfaceReady
+    ? 'server-status good'
+    : (health.llmConfigured || health.insightfaceReady ? 'server-status warn' : 'server-status bad');
 }
 
 function clearAllPeople() {
@@ -511,9 +636,12 @@ async function startSensing() {
   if (state.started) return;
   const health = await pingServer();
   if (!health?.ok) {
-    setCameraDebug('后端未启动：请先在项目目录运行 node server.mjs', 'bad');
-    addEvent('后端未连接', '浏览器无法访问 /api/health。请先启动 Node 服务再点「启动感知 demo」。');
+    setCameraDebug('后端未启动：请先在项目目录运行 .\\start.ps1', 'bad');
+    addEvent('后端未连接', '浏览器无法访问 /api/health。请先运行 start.ps1 再点「启动感知 demo」。');
     return;
+  }
+  if (!health.llmConfigured) {
+    addEvent('VLM 未配置', '关系图谱需要 VLM 识别物体。请编辑 .env 填入 LLM_API_KEY 后重启 start.ps1。');
   }
   if (!health.insightfaceReady) {
     addEvent('InsightFace 未就绪', health.insightfaceDetail || '请看 node 终端里的 Python 提示');
@@ -600,10 +728,15 @@ async function updateSceneUnderstanding() {
   if (!state.serverOnline) {
     const health = await pingServer();
     if (!health?.ok) {
-      elements.sceneStatus.textContent = '场景理解已暂停：后端未连接。请运行 node server.mjs 后刷新页面。';
+      elements.sceneStatus.textContent = '场景理解已暂停：后端未连接。请运行 .\\start.ps1 后刷新页面。';
       state.visionPausedUntil = Date.now() + 15000;
       return;
     }
+  }
+  if (!state.llmConfigured) {
+    elements.sceneStatus.textContent = 'VLM 未配置：无法识别桌面物体。请编辑项目目录下的 .env，填入 LLM_API_KEY，然后 Ctrl+C 重启 start.ps1。';
+    state.sceneFrames = [];
+    return;
   }
   if (Date.now() < state.visionPausedUntil) return;
   state.sceneBusy = true;
@@ -625,6 +758,11 @@ async function updateSceneUnderstanding() {
     const data = await response.json();
     state.scene = data.scene;
     if (data.debug) state.scene.debug = data.debug;
+    if (data.scene?.vlmError?.code === 'openai_quota_exceeded') {
+      state.visionPausedUntil = Date.now() + 120000;
+    } else if (data.scene?.vlmError?.code === 'rate_limited') {
+      state.visionPausedUntil = Date.now() + 60000;
+    }
     state.lastSceneAt = Date.now();
     mergeSceneMemory(state.scene);
     localStorage.setItem('hri-demo-scene', JSON.stringify(state.scene));
@@ -649,21 +787,27 @@ function mergeSceneMemory(scene) {
   const ownerId = person?.id || 'unknown_person';
   const ownerName = person?.name || '未知用户';
   const now = new Date().toISOString();
-  const objects = Array.isArray(scene.objects) ? scene.objects.map(normalizeSceneObjectInput) : [];
-  const interactions = Array.isArray(scene.interactions) ? scene.interactions : [];
+  const objects = Array.isArray(scene.objects) ? scene.objects.map(normalizeSceneObjectInput).filter(Boolean) : [];
+  const interactions = Array.isArray(scene.interactions) ? scene.interactions.map(normalizeSceneInteractionInput).filter(Boolean) : [];
 
-  objects.forEach(label => {
-    const object = upsertSceneObject(label, ownerId, ownerName, now);
+  const byLabel = new Map();
+  objects.forEach(input => {
+    const object = upsertSceneObject(input, now);
+    byLabel.set(object.normalized, object);
+    byLabel.set(object.id, object);
     if (ownerId !== 'unknown_person') {
-      upsertSceneRelation(ownerId, object.id, 'possibly_owns_or_uses', `Seen with ${ownerName}`, now);
+      // 只是同框出现 -> 弱关系（seen_with），不直接断言所属。
+      bumpRelation(ownerId, ownerName, object, 'appearance', `与 ${ownerName} 同时出现`, now);
     }
   });
 
   interactions.forEach(interaction => {
-    const object = findObjectMentionedInText(interaction);
-    const targetId = object?.id || 'scene';
-    upsertSceneRelation(ownerId, targetId, 'interacts_with', interaction, now);
-    addSceneEvent('interaction', interaction, { personId: ownerId, objectId: targetId }, now);
+    const object = byLabel.get(normalizeLabel(interaction.object)) || byLabel.get(interaction.object) || findObjectMentionedInText(interaction.object || interaction.description);
+    if (!object) return;
+    const label = INTERACTION_LABELS[interaction.action] || interaction.action;
+    const summary = `${ownerName} ${label} ${object.label}`;
+    bumpRelation(ownerId, ownerName, object, interaction.action, interaction.description || summary, now);
+    addSceneEvent('interaction', summary, { personId: ownerId, objectId: object.id, action: interaction.action }, now);
   });
 
   if (scene.action_change) {
@@ -673,69 +817,143 @@ function mergeSceneMemory(scene) {
   state.sceneMemory.objects = state.sceneMemory.objects.slice(-40);
   state.sceneMemory.relations = state.sceneMemory.relations.slice(-60);
   state.sceneMemory.events = state.sceneMemory.events.slice(-30);
-  localStorage.setItem('hri-demo-scene-memory', JSON.stringify(state.sceneMemory));
+  persistGraph();
   renderSceneMemory();
 }
 
 function normalizeLabel(label) {
-  return String(label).trim().toLowerCase().replace(/[\s_]+/g, ' ');
+  return String(label || '').trim().toLowerCase().replace(/[\s_]+/g, ' ');
 }
 
 function normalizeSceneObjectInput(value) {
-  if (typeof value === 'string') return value;
-  if (value && typeof value === 'object') return value.label || value.name || value.id || JSON.stringify(value);
-  return String(value);
+  if (typeof value === 'string') {
+    const label = value.trim();
+    return label ? { id: null, label, visualDescription: '', bboxNorm: null, state: 'present' } : null;
+  }
+  if (value && typeof value === 'object') {
+    const label = String(value.label || value.name || '').trim();
+    if (!label) return null;
+    return {
+      id: value.id ? String(value.id) : null,
+      label,
+      visualDescription: String(value.visual_description || value.visualDescription || ''),
+      bboxNorm: Array.isArray(value.bbox_norm) ? value.bbox_norm : (Array.isArray(value.bboxNorm) ? value.bboxNorm : null),
+      state: value.state === 'gone' ? 'gone' : 'present',
+    };
+  }
+  return null;
 }
 
-function upsertSceneObject(label, ownerId, ownerName, now) {
-  const normalized = normalizeLabel(label);
-  let object = state.sceneMemory.objects.find(item => item.normalized === normalized);
+function normalizeSceneInteractionInput(value) {
+  if (typeof value === 'string') return { object: '', action: 'near', description: value };
+  if (value && typeof value === 'object') {
+    return {
+      object: String(value.object || value.target || ''),
+      action: String(value.action || 'near'),
+      description: String(value.description || value.summary || ''),
+    };
+  }
+  return null;
+}
+
+function upsertSceneObject(input, now) {
+  let object = matchSceneObjectInstance(input);
   if (!object) {
     state.sceneMemory.counters.object += 1;
     object = {
-      id: `obj_${state.sceneMemory.counters.object}`,
-      label: String(label),
-      normalized,
+      id: input.id || `obj_${state.sceneMemory.counters.object}`,
+      label: input.label,
+      normalized: normalizeLabel(input.label),
+      visualDescription: input.visualDescription || '',
+      bboxNorm: input.bboxNorm || null,
+      thumbnail: '',
       firstSeen: now,
       lastSeen: now,
       seenCount: 0,
-      owners: [],
+      status: input.state || 'present',
     };
     state.sceneMemory.objects.push(object);
   }
-  object.label = String(label);
+  object.label = input.label;
   object.lastSeen = now;
   object.seenCount += 1;
-  if (ownerId !== 'unknown_person' && !object.owners.some(owner => owner.id === ownerId)) {
-    object.owners.push({ id: ownerId, name: ownerName, confidence: 'weak_contextual' });
+  object.status = input.state || 'present';
+  if (input.visualDescription) object.visualDescription = input.visualDescription;
+  if (input.bboxNorm) object.bboxNorm = input.bboxNorm;
+  if (!object.thumbnail && object.bboxNorm) {
+    object.thumbnail = captureRegionThumbnail(object.bboxNorm);
   }
   return object;
 }
 
-function upsertSceneRelation(sourceId, targetId, type, evidence, now) {
-  let relation = state.sceneMemory.relations.find(item => item.sourceId === sourceId && item.targetId === targetId && item.type === type);
+// 累积一次观察到的人-物关系，并根据交互类型升级强度与置信度。
+function bumpRelation(personId, personName, object, action, evidence, now) {
+  let relation = state.sceneMemory.relations.find(item => item.personId === personId && item.objectId === object.id);
   if (!relation) {
     state.sceneMemory.counters.relation += 1;
     relation = {
       id: `rel_${state.sceneMemory.counters.relation}`,
-      sourceId,
-      targetId,
-      type,
+      personId,
+      personName,
+      objectId: object.id,
+      objectLabel: object.label,
+      type: 'seen_with',
+      strength: 'weak',
+      status: 'hypothesis',
+      count: 0,
+      interactionCount: 0,
+      contactCount: 0,
+      lastAskedAt: 0,
+      evidence: [],
       firstSeen: now,
       lastSeen: now,
-      count: 0,
-      evidence: [],
     };
     state.sceneMemory.relations.push(relation);
   }
+  relation.personName = personName;
+  relation.objectLabel = object.label;
   relation.lastSeen = now;
   relation.count += 1;
-  relation.evidence.unshift(evidence);
+  if (action !== 'appearance') {
+    relation.interactionCount += 1;
+    if (CONTACT_ACTIONS.includes(action)) relation.contactCount += 1;
+  }
+  relation.evidence.unshift(`${nowLabel()} · ${evidence}`);
   relation.evidence = relation.evidence.slice(0, 4);
+  recomputeRelation(relation);
+  return relation;
+}
+
+// 关系强度规则：用户确认/否认优先；否则按接触次数与共现次数推断弱/中/强。
+function recomputeRelation(relation) {
+  if (relation.status === 'confirmed') {
+    relation.type = 'owns_confirmed';
+    relation.strength = 'strong';
+    relation.confidence = 0.99;
+    return;
+  }
+  if (relation.status === 'rejected') {
+    relation.type = 'rejected';
+    relation.strength = 'weak';
+    relation.confidence = 0.05;
+    return;
+  }
+  if (relation.contactCount >= 3 || relation.interactionCount >= 5) {
+    relation.type = 'frequently_uses';
+    relation.strength = 'strong';
+  } else if (relation.contactCount >= 1 || relation.count >= 3) {
+    relation.type = 'uses';
+    relation.strength = 'medium';
+  } else {
+    relation.type = 'seen_with';
+    relation.strength = 'weak';
+  }
+  relation.confidence = RELATION_STRENGTHS[relation.strength];
 }
 
 function findObjectMentionedInText(text) {
   const normalized = normalizeLabel(text);
+  if (!normalized) return null;
   return state.sceneMemory.objects.find(object => normalized.includes(object.normalized) || object.normalized.includes(normalized));
 }
 
@@ -758,17 +976,130 @@ function addSceneEvent(type, summary, refs, now) {
   });
 }
 
+const RELATION_TYPE_LABELS = {
+  seen_with: '同框出现',
+  uses: '在使用',
+  frequently_uses: '经常使用',
+  owns_confirmed: '已确认所属',
+  rejected: '已否认所属',
+};
+const STRENGTH_LABELS = { weak: '弱', medium: '中', strong: '强' };
+
+function relationStatusBadge(relation) {
+  if (relation.status === 'confirmed') return '<span class="rel-badge confirmed">已确认</span>';
+  if (relation.status === 'rejected') return '<span class="rel-badge rejected">已否认</span>';
+  return `<span class="rel-badge ${relation.strength}">${STRENGTH_LABELS[relation.strength] || ''}·假设</span>`;
+}
+
+// 描述某个人物节点当前的身份证据（显式/人脸/声纹/未确认）。
+function describePersonEvidence(personId) {
+  if (personId === 'unknown_person') return '未确认身份';
+  const parts = [];
+  if (state.explicitPersonId === personId) parts.push('显式选择');
+  if (state.faceMatch.personId === personId && state.faceMatch.score > 0) parts.push(`人脸 ${Math.round(state.faceMatch.score * 100)}%`);
+  if (state.voiceMatch.personId === personId && state.voiceMatch.score > 0) parts.push(`声纹 ${Math.round(state.voiceMatch.score * 100)}%`);
+  const person = state.people.find(item => item.id === personId);
+  if (!parts.length && person) parts.push(person.samples ? '已建档·未在场' : '已建档');
+  return parts.join(' · ') || '未确认';
+}
+
+function personAvatarInitial(name) {
+  const trimmed = String(name || '?').trim();
+  return escapeHtml(trimmed ? trimmed.slice(0, 1).toUpperCase() : '?');
+}
+
+// 汇总关系图谱里出现的人物实例（含当前活跃人物），形成 person 节点。
+function collectPersonNodes() {
+  const map = new Map();
+  const add = (id, name) => {
+    if (!id) return;
+    if (!map.has(id)) map.set(id, { id, name: name || '未知用户', relationCount: 0 });
+    else if (name && map.get(id).name === '未知用户') map.get(id).name = name;
+  };
+  const active = activePerson();
+  if (active) add(active.id, active.name);
+  state.sceneMemory.relations.forEach(relation => add(relation.personId, relation.personName));
+  state.sceneMemory.relations.forEach(relation => {
+    if (map.has(relation.personId)) map.get(relation.personId).relationCount += 1;
+  });
+  return [...map.values()];
+}
+
 function renderSceneMemory() {
-  const person = activePerson();
-  const objects = state.sceneMemory.objects.slice(-8).reverse();
-  const relations = state.sceneMemory.relations.slice(-6).reverse();
-  const events = state.sceneMemory.events.slice(0, 5);
-  elements.sceneMemory.innerHTML = [
-    `<div><label>当前人物节点</label><strong>${escapeHtml(person ? `${person.name} (${person.id.slice(0, 8)})` : 'unknown_person')}</strong><p>关系档案会被写入 VLM snapshot，用于保持跨窗口一致性。</p></div>`,
-    `<div><label>稳定物体节点</label><strong>${objects.map(object => `${object.id}:${object.label}×${object.seenCount}`).join(' · ') || 'none'}</strong><p>同名物体会被合并成稳定 ID，后续可升级为视觉 re-id。</p></div>`,
-    `<div><label>人物-物品关系</label><strong>${relations.map(relation => `${relation.sourceId}→${relation.targetId}:${relation.type}×${relation.count}`).join(' · ') || 'none'}</strong><p>所属关系默认是弱证据：seen-with / uses，不直接断言拥有。</p></div>`,
-    `<div><label>最近事件</label><strong>${events.map(event => `${event.id}:${event.summary}`).join(' · ') || 'none'}</strong><p>事件用于让机器人知道“刚才发生过什么”，而不是每次重置。</p></div>`,
-  ].join('');
+  const objects = state.sceneMemory.objects.slice(-12).reverse();
+  const relations = [...state.sceneMemory.relations]
+    .filter(relation => relation.personId !== 'unknown_person' || relation.status !== 'hypothesis' || relation.count > 1)
+    .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
+    .slice(0, 10);
+  const events = state.sceneMemory.events.slice(0, 6);
+
+  const objectCards = objects.map(object => `
+    <div class="graph-object" data-object="${object.id}">
+      ${object.thumbnail ? `<img src="${object.thumbnail}" alt="${escapeHtml(object.label)}" />` : '<div class="graph-object-noimg">无图像</div>'}
+      <div class="graph-object-body">
+        <strong>${escapeHtml(object.id)} · ${escapeHtml(object.label)}</strong>
+        <span>${escapeHtml(object.visualDescription || '暂无外观描述')}</span>
+        <span class="graph-object-meta">×${object.seenCount} · ${object.status === 'gone' ? '已离开' : '在场'}</span>
+        <div class="graph-actions">
+          <button type="button" data-obj-rename="${object.id}">改名</button>
+          <button type="button" data-obj-delete="${object.id}">删除</button>
+        </div>
+      </div>
+    </div>
+  `).join('') || '<p class="graph-empty">还没有稳定物体实例。等待 VLM 观察桌面物体。</p>';
+
+  const relationRows = relations.map(relation => `
+    <div class="graph-relation ${relation.status}" data-relation="${relation.id}">
+      <div class="graph-relation-head">
+        <strong>${escapeHtml(relation.personName)} → ${escapeHtml(relation.objectLabel)} <small>(${escapeHtml(relation.objectId)})</small></strong>
+        ${relationStatusBadge(relation)}
+      </div>
+      <div class="graph-relation-meta">${RELATION_TYPE_LABELS[relation.type] || relation.type} · 共现×${relation.count} · 接触×${relation.contactCount} · 置信 ${Math.round((relation.confidence || 0) * 100)}%</div>
+      <div class="graph-relation-evidence">${(relation.evidence || []).slice(0, 2).map(escapeHtml).join('<br>') || '暂无证据'}</div>
+      <div class="graph-actions">
+        <button type="button" data-rel-confirm="${relation.id}">这是我的</button>
+        <button type="button" data-rel-reject="${relation.id}">不是我的</button>
+        <button type="button" data-rel-frequent="${relation.id}">我经常用</button>
+        <button type="button" data-rel-occasional="${relation.id}">只是偶尔</button>
+        <button type="button" data-rel-delete="${relation.id}">删除</button>
+      </div>
+    </div>
+  `).join('') || '<p class="graph-empty">还没有人-物关系。被识别的用户与物体多次同框/交互后会出现。</p>';
+
+  const eventRows = events.map(event => `<li><span>${escapeHtml(event.summary)}</span><small>${event.count > 1 ? `×${event.count}` : ''}</small></li>`).join('') || '<li class="graph-empty">暂无事件</li>';
+
+  const pending = state.pendingOwnership ? `<div class="graph-pending">待确认：${escapeHtml(state.pendingOwnership.question || '这个物体是你的吗？')}</div>` : '';
+
+  const personNodes = collectPersonNodes();
+  const personCards = personNodes.map(node => `
+    <div class="graph-person ${node.id === state.activePersonId ? 'active' : ''}">
+      <div class="graph-person-avatar">${personAvatarInitial(node.name)}</div>
+      <div class="graph-person-body">
+        <strong>${escapeHtml(node.name)} <small>(${escapeHtml(node.id)})</small></strong>
+        <span>${escapeHtml(describePersonEvidence(node.id))}</span>
+        <span class="graph-object-meta">关系 ×${node.relationCount}${node.id === state.activePersonId ? ' · 当前在场' : ''}</span>
+      </div>
+    </div>
+  `).join('') || '<p class="graph-empty">还没有人物节点。绑定/识别用户后会出现。</p>';
+
+  elements.sceneMemory.innerHTML = `
+    ${pending}
+    <div class="graph-section"><label>人物实例</label><div class="graph-persons">${personCards}</div></div>
+    <div class="graph-section"><label>物体实例（图像证据）</label><div class="graph-objects">${objectCards}</div></div>
+    <div class="graph-section"><label>人-物关系图</label><div class="graph-relations">${relationRows}</div></div>
+    <div class="graph-section"><label>最近交互事件</label><ul class="graph-events">${eventRows}</ul></div>
+  `;
+}
+
+function describeVlmError(raw) {
+  const text = String(raw || '');
+  if (/quota|billing|insufficient_quota/i.test(text)) {
+    return 'OpenAI 配额用尽：请到 platform.openai.com 充值或换有效 Key';
+  }
+  if (/invalid api key|incorrect api key|401/i.test(text)) {
+    return 'API Key 无效，请更新 .env 后重启 start.ps1';
+  }
+  return text.slice(0, 120);
 }
 
 function captureVideoFrame() {
@@ -787,11 +1118,26 @@ function renderScene() {
     return;
   }
   const scene = state.scene;
-  elements.sceneStatus.textContent = `最近更新：${nowLabel()} · source ${scene.source || 'vlm'} · ${scene.debug?.frameCount || 0} frames${scene.error ? ` · error: ${scene.error}` : ''}`;
+  const vlmErr = scene.vlmError;
+  const errNote = vlmErr
+    ? ` · ${vlmErr.hint || vlmErr.message}`
+    : (scene.error ? ` · ${describeVlmError(scene.error)}` : '');
+  elements.sceneStatus.textContent = `最近更新：${nowLabel()} · source ${scene.source || 'vlm'} · ${scene.debug?.frameCount || 0} frames${errNote}`;
+  if (vlmErr?.code === 'openai_quota_exceeded') {
+    elements.sceneStatus.className = 'scene-status bad';
+  } else if (scene.source === 'vlm') {
+    elements.sceneStatus.className = 'scene-status';
+  }
+  const objectLabels = (scene.objects || []).map(item => typeof item === 'string' ? item : (item.label || item.id || '')).filter(Boolean);
+  const interactionLabels = (scene.interactions || []).map(item => {
+    if (typeof item === 'string') return item;
+    const action = INTERACTION_LABELS[item.action] || item.action || '';
+    return [action, item.object, item.description].filter(Boolean).join(' ');
+  }).filter(Boolean);
   const rows = [
     ['人在做什么', scene.person_activity || 'unknown'],
-    ['物体', (scene.objects || []).join(' · ') || 'none'],
-    ['人-物交互', (scene.interactions || []).join(' · ') || 'none'],
+    ['物体', objectLabels.join(' · ') || 'none'],
+    ['人-物交互', interactionLabels.join(' · ') || 'none'],
     ['动作变化', scene.action_change || 'unknown'],
     ['打断时机', `${scene.interruptibility || 'unknown'} · ${scene.reason || ''}`],
     ['建议动作', scene.robot_action || 'observe'],
@@ -1292,8 +1638,13 @@ function drawFaceOverlay(landmarks) {
     canvas.height = height;
   }
   context.clearRect(0, 0, canvas.width, canvas.height);
+  drawSceneObjectOverlays(context, canvas.width, canvas.height);
+
   if (!landmarks) {
-    elements.faceHud.textContent = state.faceModelReady ? 'Face model: ready · no face detected' : 'Face model: loading...';
+    const objCount = recentSceneObjects().length;
+    elements.faceHud.textContent = state.faceModelReady
+      ? (objCount ? `Face model: ready · no face · ${objCount} object(s) from VLM` : 'Face model: ready · no face detected')
+      : 'Face model: loading...';
     return;
   }
 
@@ -1342,7 +1693,41 @@ function drawFaceOverlay(landmarks) {
   context.fillRect(left, Math.max(0, top - 32), Math.min(canvas.width - left, 520), 26);
   context.fillStyle = '#7bdff2';
   context.fillText(label, left + 10, Math.max(18, top - 13));
-  elements.faceHud.textContent = `Face tracked · ${landmarks.length} landmarks · ${state.faceBlendshapes.length} blendshape fields · ${label}`;
+  const objCount = recentSceneObjects().length;
+  elements.faceHud.textContent = `Face tracked · ${landmarks.length} landmarks · ${state.faceBlendshapes.length} blendshape fields · ${label}${objCount ? ` · VLM objects ${objCount}` : ''}`;
+}
+
+// VLM 返回的物体 bbox 画在视频上（橙色框）；人脸框仍是 MediaPipe 实时绘制。
+function recentSceneObjects() {
+  const cutoff = Date.now() - 45000;
+  return state.sceneMemory.objects.filter(object =>
+    object.status !== 'gone'
+    && object.bboxNorm
+    && new Date(object.lastSeen).getTime() >= cutoff
+  );
+}
+
+function drawSceneObjectOverlays(context, width, height) {
+  recentSceneObjects().forEach(object => {
+    const [x, y, w, h] = object.bboxNorm;
+    const left = x * width;
+    const top = y * height;
+    const boxW = w * width;
+    const boxH = h * height;
+    context.save();
+    context.strokeStyle = 'rgba(255, 189, 102, 0.95)';
+    context.lineWidth = 3;
+    context.setLineDash([8, 4]);
+    context.strokeRect(left, top, boxW, boxH);
+    context.setLineDash([]);
+    context.font = '700 12px Inter, sans-serif';
+    context.fillStyle = 'rgba(15, 16, 22, 0.82)';
+    const tag = `${object.id} · ${object.label}`;
+    context.fillRect(left, Math.max(0, top - 22), Math.min(width - left, tag.length * 7 + 16), 20);
+    context.fillStyle = '#ffbd66';
+    context.fillText(tag, left + 6, Math.max(14, top - 7));
+    context.restore();
+  });
 }
 
 function renderBlendshapes() {
@@ -1415,10 +1800,12 @@ function chooseIntervention() {
   const acceptanceBoost = state.feedback.good * 0.08;
   const score = state.confidence + acceptanceBoost - privacyPenalty;
   if (state.scene?.interruptibility === 'low' && !quietMode) {
+    const work = currentWorkContext();
+    const relationNote = work ? `关系图谱：${work.personName} 与 ${work.objectLabel} 是${RELATION_TYPE_LABELS[work.type] || '使用'}关系，` : '';
     return {
       key: 'scene-hold',
       title: '场景显示不宜打断',
-      body: `我看到的场景是：${state.scene.person_activity || '用户正在专注'}。原因：${state.scene.reason || '当前更适合保持安静'}。`,
+      body: `${relationNote}我看到的场景是：${state.scene.person_activity || '用户正在专注'}。当前 interruptibility 低、不适合打断。原因：${state.scene.reason || '更适合保持安静'}。`,
       robot: 'attentive',
     };
   }
@@ -1438,6 +1825,20 @@ function chooseIntervention() {
       title: '刚刚介入过，进入冷却',
       body: '主动性需要节制。短时间内不连续打断，除非出现明显风险信号。',
       robot: 'attentive',
+    };
+  }
+
+  const ownership = pickOwnershipQuestion();
+  if (ownership && state.interactionState !== 'high_arousal') {
+    return {
+      key: 'ask-ownership',
+      title: '低频确认物品所属',
+      body: `我注意到你${ownership.contactCount >= 1 ? '多次用到' : '身边常出现'} ${ownership.objectLabel}。它是你常用 / 属于你的东西吗？你可以回答“是 / 不是”，或点关系图里的按钮。`,
+      robot: 'listening',
+      relationId: ownership.id,
+      objectId: ownership.objectId,
+      personId: ownership.personId,
+      question: `${ownership.objectLabel} 是你的吗？`,
     };
   }
 
@@ -1489,6 +1890,18 @@ function updateReasoning() {
     if (intervention.key !== 'observe') {
       state.lastInterventionAt = Date.now();
       addEvent('主动策略切换', `${intervention.title}：${intervention.body}`);
+    }
+    if (intervention.key === 'ask-ownership') {
+      const relation = state.sceneMemory.relations.find(item => item.id === intervention.relationId);
+      if (relation) relation.lastAskedAt = Date.now();
+      state.pendingOwnership = {
+        relationId: intervention.relationId,
+        objectId: intervention.objectId,
+        personId: intervention.personId,
+        question: intervention.question,
+      };
+      persistGraph();
+      renderSceneMemory();
     }
   }
 
@@ -1770,6 +2183,116 @@ if (elements.clearPeopleButton) {
   });
 }
 
+if (elements.sceneMemory) {
+  elements.sceneMemory.addEventListener('click', event => {
+    const button = event.target.closest('button[data-rel-confirm], button[data-rel-reject], button[data-rel-frequent], button[data-rel-occasional], button[data-rel-delete], button[data-obj-rename], button[data-obj-delete]');
+    if (!button) return;
+    const { relConfirm, relReject, relFrequent, relOccasional, relDelete, objRename, objDelete } = button.dataset;
+    if (relConfirm) return applyRelationCorrection(relConfirm, 'confirm');
+    if (relReject) return applyRelationCorrection(relReject, 'reject');
+    if (relFrequent) return applyRelationCorrection(relFrequent, 'frequent');
+    if (relOccasional) return applyRelationCorrection(relOccasional, 'occasional');
+    if (relDelete) return deleteRelation(relDelete);
+    if (objRename) return renameSceneObject(objRename);
+    if (objDelete) return deleteSceneObject(objDelete);
+  });
+}
+
+// 用户对关系图谱的纠正必须真正生效（确认/否认/经常/偶尔）。
+function applyRelationCorrection(relationId, kind) {
+  const relation = state.sceneMemory.relations.find(item => item.id === relationId);
+  if (!relation) return;
+  if (kind === 'confirm') {
+    relation.status = 'confirmed';
+    relation.contactCount = Math.max(relation.contactCount, 3);
+  } else if (kind === 'reject') {
+    relation.status = 'rejected';
+  } else if (kind === 'frequent') {
+    relation.status = 'hypothesis';
+    relation.contactCount = Math.max(relation.contactCount, 3);
+  } else if (kind === 'occasional') {
+    relation.status = 'hypothesis';
+    relation.contactCount = 0;
+    relation.interactionCount = Math.min(relation.interactionCount, 1);
+  }
+  recomputeRelation(relation);
+  if (state.pendingOwnership?.relationId === relationId) state.pendingOwnership = null;
+  persistGraph();
+  renderSceneMemory();
+  addEvent('关系图谱修正', `${relation.personName} → ${relation.objectLabel}：${RELATION_TYPE_LABELS[relation.type] || relation.type}`);
+}
+
+function deleteRelation(relationId) {
+  const relation = state.sceneMemory.relations.find(item => item.id === relationId);
+  state.sceneMemory.relations = state.sceneMemory.relations.filter(item => item.id !== relationId);
+  if (state.pendingOwnership?.relationId === relationId) state.pendingOwnership = null;
+  persistGraph();
+  renderSceneMemory();
+  if (relation) addEvent('关系删除', `${relation.personName} → ${relation.objectLabel}`);
+}
+
+function renameSceneObject(objectId) {
+  const object = state.sceneMemory.objects.find(item => item.id === objectId);
+  if (!object) return;
+  const next = window.prompt('为该物体实例命名（例如：我的水杯）', object.label);
+  if (next === null) return;
+  const label = next.trim();
+  if (!label) return;
+  object.label = label;
+  object.normalized = normalizeLabel(label);
+  state.sceneMemory.relations.forEach(relation => {
+    if (relation.objectId === objectId) relation.objectLabel = label;
+  });
+  persistGraph();
+  renderSceneMemory();
+  addEvent('物体改名', `${objectId} → ${label}`);
+}
+
+function deleteSceneObject(objectId) {
+  const object = state.sceneMemory.objects.find(item => item.id === objectId);
+  state.sceneMemory.objects = state.sceneMemory.objects.filter(item => item.id !== objectId);
+  state.sceneMemory.relations = state.sceneMemory.relations.filter(item => item.objectId !== objectId);
+  if (state.pendingOwnership?.objectId === objectId) state.pendingOwnership = null;
+  persistGraph();
+  renderSceneMemory();
+  if (object) addEvent('物体删除', `${objectId} · ${object.label}`);
+}
+
+// 当存在待确认所属问题时，解析用户“是/不是”的口头回答并落到关系图谱。
+function handleOwnershipReply(text) {
+  if (!state.pendingOwnership) return false;
+  const yes = /^(是|对|嗯|没错|是我的|对的|yes|yeah|yep)/i.test(text) || /(是我的|我的|我常用|经常用|我自己)/.test(text);
+  const no = /^(不|没|不是|否|no|nope)/i.test(text) || /(不是我的|不是我|别人的|不属于|只是偶尔|偶然)/.test(text);
+  if (!yes && !no) return false;
+  applyRelationCorrection(state.pendingOwnership.relationId, yes ? 'confirm' : 'reject');
+  return true;
+}
+
+// 找到“正在工作 / 使用电脑”这类会影响打断策略的关系，让策略可解释。
+function currentWorkContext() {
+  const person = activePerson();
+  if (!person) return null;
+  return state.sceneMemory.relations.find(relation =>
+    relation.personId === person.id
+    && relation.status !== 'rejected'
+    && (relation.strength === 'strong' || relation.status === 'confirmed')
+    && /laptop|computer|desktop|monitor|电脑|笔记本|显示器/.test(normalizeLabel(relation.objectLabel))
+  ) || null;
+}
+
+// 适时（低频）挑选一个值得向用户确认所属权的关系。
+function pickOwnershipQuestion() {
+  if (state.pendingOwnership) return null;
+  const now = Date.now();
+  return state.sceneMemory.relations.find(relation =>
+    relation.personId !== 'unknown_person'
+    && relation.status === 'hypothesis'
+    && (relation.strength === 'medium' || relation.strength === 'strong')
+    && relation.interactionCount >= 2
+    && now - (relation.lastAskedAt || 0) > 60000
+  ) || null;
+}
+
 elements.enrollVoiceButton.addEventListener('click', async () => {
   const person = activePerson();
   if (!person) {
@@ -1903,6 +2426,7 @@ function buildInteractionSnapshot() {
     feedback: state.feedback,
     scene: state.scene,
     sceneMemory: compactSceneMemory(),
+    pendingOwnership: state.pendingOwnership,
   };
 }
 
@@ -1913,15 +2437,22 @@ function compactSceneMemory() {
     objects: state.sceneMemory.objects.slice(-16).map(object => ({
       id: object.id,
       label: object.label,
+      visual_description: object.visualDescription,
+      bbox_norm: object.bboxNorm,
       seenCount: object.seenCount,
-      owners: object.owners,
+      status: object.status,
     })),
     relations: state.sceneMemory.relations.slice(-20).map(relation => ({
       id: relation.id,
-      sourceId: relation.sourceId,
-      targetId: relation.targetId,
+      personId: relation.personId,
+      personName: relation.personName,
+      objectId: relation.objectId,
+      objectLabel: relation.objectLabel,
       type: relation.type,
+      strength: relation.strength,
+      status: relation.status,
       count: relation.count,
+      interactionCount: relation.interactionCount,
       evidence: relation.evidence.slice(0, 2),
     })),
     recentEvents: state.sceneMemory.events.slice(0, 8).map(event => ({
@@ -1941,6 +2472,15 @@ async function sendUserMessage(rawText) {
   elements.chatInput.value = '';
   elements.robot.className = 'robot listening';
   elements.robotStatus.textContent = '正在理解你的话';
+
+  if (handleOwnershipReply(text)) {
+    const ack = '好的，我已经更新了关系图谱。';
+    addMessage('assistant', ack);
+    elements.robot.className = 'robot caring';
+    elements.robotStatus.textContent = '已更新关系图谱';
+    speak(ack);
+    return;
+  }
 
   const reply = await getCompanionReply(text);
   addMessage('assistant', reply);

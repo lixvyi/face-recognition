@@ -1,0 +1,40 @@
+.DS_Store
+Thumbs.db
+
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+npm-debug.log*
+*.log
+boot.log
+boot.err
+
+# InsightFace / ML model caches (downloaded on first run)
+.insightface/
+**/.insightface/
+
+# MediaPipe large binaries (download separately or vendor without wasm/task)
+vendor/mediapipe/models/
+vendor/mediapipe/**/*.wasm
+vendor/mediapipe/**/wasm/
+*.task
+*.wasm
+*.onnx
+*.bin
+
+# OS / editor
+.idea/
+.vscode/
+*.swp

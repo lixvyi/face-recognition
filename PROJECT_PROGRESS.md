@@ -1,6 +1,6 @@
 # HRI Companion Demo 项目进度
 
-更新时间：2026-05-30
+更新时间：2026-05-31
 
 ## 当前定位
 
@@ -52,16 +52,30 @@
 - 图片格式使用 Anthropic 风格 base64 image part。
 - 输出结构化场景 JSON：活动、物体、交互、动作变化、打断时机、建议动作。
 
-### 6. 持续场景记忆
+### 6. 实例级关系图谱（已完成 2026-05-31，TASK_GUIDE）
 
-当前已有基础 scene memory：
+已从 label-level 升级为 instance-level relationship memory（对应 Kimi 记忆分层中的「情景记忆 / 图记忆」）：
 
-- objects
-- relations
-- events
-- object/relation/event counters
+- 物体实例化：VLM 返回 `{id,label,visual_description,bbox_norm,state}`，前端按「类别 + bbox 空间位置 + 外观描述」做实例匹配，区分同类不同物体（两个杯子）。
+- 图像证据：按 `bbox_norm` 从当前帧裁剪缩略图，写入物体节点。
+- 人-物关系：`person_id → object_id`，类型 `seen_with / uses / frequently_uses / owns_confirmed / rejected`，强度弱/中/强 + 置信度。
+- 交互事件链：`holding/picking_up/putting_down/using/touching/looking_at` 累积升级关系强度并记录事件。
+- 用户纠正即时生效：这是我的 / 不是我的 / 我经常用 / 只是偶尔 / 改名 / 删除（按钮 + 对话「是/不是」均可）。
+- 低频主动确认：中/强假设关系会触发一次低打扰的所属确认（`ask-ownership`，60s 节流）。
+- 关系进入策略：使用电脑等强/已确认关系会让 `interruptibility=low` 时给出可解释的低打扰理由。
+- 跨轮持久：`localStorage('hri-demo-scene-memory')`，刷新后图谱不丢失，旧数据自动迁移。
+- 多用户区分：relations 按 `person_id` 分离，同一 `obj_x` 可对不同人有不同关系。
 
-但目前仍偏 label-level，后续重点是升级为 instance-level relationship memory。
+验收对照（TASK_GUIDE 测试 1-8 / 演示场景）：
+
+- [x] 桌面物体形成稳定实例 ID + 图像证据（场景 1）
+- [x] 拿起水杯出现 `person → obj` 关系与事件（场景 2 / 测试 1-2）
+- [x] 同类两物体不混淆（测试 3）
+- [x] 用户确认所属升级为 `owns_confirmed`（测试 4）
+- [x] 用户否认后不再断言归属（`rejected`，测试 5）
+- [x] 关系进入打断策略而非仅展示（测试 6）
+- [x] 刷新/多轮后图谱持久（测试 7）
+- [x] 两个用户分开、同物体不同关系（测试 8）
 
 ### 7. 身份和关系档案
 
@@ -98,18 +112,18 @@
 
 1. ~~真实人脸识别仍需稳定 face crop 和 InsightFace runtime~~ → 方向 A 已落地；极端侧脸/暗光仍可能 `no_face`。
 2. 真实声纹识别依赖 SpeechBrain 模型下载和音频采样质量（方向 B）。
-3. scene memory 当前还不是实例级 object re-id。
-4. 前端关系图谱还需要产品化显化。
+3. ~~scene memory 当前还不是实例级 object re-id~~ → 已升级实例级图谱；物体 re-id 目前用 bbox+描述启发式，未来可换视觉 embedding。
+4. ~~前端关系图谱还需要产品化显化~~ → 已显化（缩略图 + 关系强弱 + 用户纠正按钮）。
 5. 隐私控制面板可继续补齐（已有清空档案；导出/全量 purge 待做）。
 
 ## 重点下一步
 
-方向 A 完成后，建议任选其一推进：
+方向 A 与实例级关系图谱完成后，建议任选其一推进：
 
 ```text
 方向 B：稳定真实声纹识别（HANDOVER_README）
-实例级关系图谱显化（TASK_GUIDE.md）
-四层记忆架构（UST/ST/WM/LT）
+物体视觉 re-id（用 embedding 替换 bbox 启发式匹配）
+四层记忆架构（UST/ST/WM/LT，向量库 + RAG + 遗忘 + 反思）
 ```
 
 项目交接说明见：
