@@ -7,9 +7,10 @@ import { access } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 
 const root = process.cwd();
+await loadEnvFile(join(root, '.env'));
 const port = Number(process.env.PORT || 8173);
 const codexConfig = await loadCodexProvider();
-const apiKey = process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || await loadCodexApiKey();
+const apiKey = resolveApiKey(process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || await loadCodexApiKey());
 const model = process.env.LLM_MODEL || process.env.OPENAI_MODEL || codexConfig.model || 'gpt-4.1-mini';
 const baseUrl = normalizeBaseUrl(process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || codexConfig.baseUrl || 'https://api.openai.com/v1');
 const wireApi = process.env.LLM_WIRE_API || process.env.OPENAI_WIRE_API || codexConfig.wireApi || 'responses';
@@ -62,6 +63,10 @@ const server = createServer(async (request, response) => {
         pythonPath: pythonRuntime.executable,
         insightfaceReady: pythonRuntime.insightfaceReady,
         insightfaceDetail: pythonRuntime.detail,
+        llmConfigured: Boolean(apiKey),
+        llmModel: model,
+        llmBaseUrl: baseUrl,
+        llmWireApi: wireApi,
         port,
       });
       return;
@@ -91,7 +96,7 @@ async function handleChat(request, response) {
     return;
   }
 
-  const llmResponse = await fetch(`${baseUrl}/${wireApi}`, {
+  const llmResponse = await fetch(apiUrl(wireApi), {
     method: 'POST',
     signal: AbortSignal.timeout(timeoutMs),
     headers: {
@@ -366,7 +371,7 @@ async function handleVision(request, response) {
     return;
   }
 
-  const visionResponse = await fetch(`${baseUrl}/${wireApi}`, {
+  const visionResponse = await fetch(apiUrl(wireApi), {
     method: 'POST',
     signal: AbortSignal.timeout(timeoutMs),
     headers: {
@@ -378,13 +383,26 @@ async function handleVision(request, response) {
 
   if (!visionResponse.ok) {
     const detail = await visionResponse.text();
-    sendJson(response, 200, { scene: { ...localVisionFallback(snapshot), source: 'local_after_vlm_error', error: detail.slice(0, 240) }, debug });
+    const vlmError = parseVlmApiError(detail, visionResponse.status);
+    sendJson(response, 200, {
+      scene: { ...localVisionFallback(snapshot), source: 'local_after_vlm_error', error: vlmError.message, vlmError },
+      debug: { ...debug, vlmErrorCode: vlmError.code },
+    });
     return;
   }
 
   const data = await visionResponse.json();
   const text = extractResponseText(data);
   sendJson(response, 200, { scene: parseSceneJson(text, snapshot), debug: { ...debug, rawTextPrefix: text.slice(0, 240) } });
+}
+
+function apiUrl(endpoint) {
+  const path = String(endpoint || 'responses').replace(/^\/+/, '');
+  return `${baseUrl}/${path}`;
+}
+
+function usesChatCompletions() {
+  return wireApi === 'chat/completions' || wireApi === 'chat/completions/';
 }
 
 function extractResponseText(data) {
@@ -411,6 +429,10 @@ function buildLlmPayload(text, snapshot, messages) {
     '目标：低侵入、体贴、可解释、有边界。',
     '不要声称诊断情绪或心理疾病。只基于互动状态、用户话语和关系记忆给陪伴式回应。',
     '回复中文，1-3 句，具体、温和、给用户选择权。',
+    'interactionSnapshot.sceneMemory 是实例级关系图谱：可引用 objects（物体实例）和 relations（人-物关系）。',
+    'relations 里 status=confirmed 表示用户已确认所属，可以放心引用；status=rejected 表示用户否认，绝不要再说这东西属于他。',
+    '如果当前正在确认某物体所属（snapshot.pendingOwnership），用一句自然的话求证，不要追问细节。',
+    '如果用户正在使用电脑等且 interruptibility 低，倾向低打扰、简短回应。',
     '如果用户表达强烈风险或自伤意图，建议联系身边可信的人或当地紧急服务。',
   ].join('\n');
   const userContent = JSON.stringify({
@@ -420,6 +442,18 @@ function buildLlmPayload(text, snapshot, messages) {
   });
 
   if (wireApi === 'messages') {
+    return {
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userContent },
+      ],
+      temperature: 0.7,
+      max_tokens: maxTokens,
+    };
+  }
+
+  if (usesChatCompletions()) {
     return {
       model,
       messages: [
@@ -456,14 +490,25 @@ function normalizeVisionFrames(payload) {
 
 function buildVisionPayload(frames, snapshot, sceneMemory) {
   const instruction = [
-    '你是 HRI 机器人实时场景理解模块。',
-    '你会收到最近约 9-10 秒内按时间顺序采样的 3 张图片，以及传感器 snapshot。',
-    '只根据这些图片和 snapshot，输出严格 JSON，不要 Markdown。',
-    '不要诊断情绪。描述人在这段时间里做了什么、可见物体、人-物交互、动作变化、是否适合打断。',
-    '如果 SCENE_MEMORY 里已有相同/相近物体或人物，请在 objects/interactions/reason 中复用已有 stable id，例如 obj_3、rel_2，不要每轮当成全新物体。',
-    '如果看到某个物体可能属于当前人物，只能说 possibly uses/possibly owns，除非多次出现。',
+    '你是 HRI 机器人实时场景理解模块，负责维护实例级关系图谱。',
+    '你会收到最近约 9-10 秒内按时间顺序采样的 3 张图片，以及传感器 snapshot 和已有 SCENE_MEMORY。',
+    '只根据这些图片、snapshot 和 SCENE_MEMORY，输出严格 JSON，不要 Markdown，不要解释。',
+    '不要诊断情绪。只描述人在这段时间里做了什么、可见物体实例、人-物交互、动作变化、是否适合打断。',
+    '【实例级要求】objects 必须是数组，每个元素是对象：{id, label, visual_description, bbox_norm, state}。',
+    '- id：如果 SCENE_MEMORY.objects 里已有同一个具体物体（看外观/位置判断，不只看类别），复用其 id（如 obj_3）；否则填 null 表示新实例。',
+    '- label：物体类别英文小写，如 cup / mug / laptop / phone。',
+    '- visual_description：颜色+材质+特征，用于区分同类不同实例，如 "white ceramic mug with handle"。',
+    '- bbox_norm：[x, y, w, h]，取值 0~1 的归一化坐标（相对整帧），用于裁剪缩略图与位置匹配。尽量给准确框。',
+    '- state：present 或 gone。',
+    '同一类别但外观不同的两个物体（例如白色马克杯和透明玻璃杯）必须是两个不同元素、不同 id。',
+    '【交互要求】interactions 必须是数组，每个元素是对象：{object, action, description}。',
+    '- object：对应 objects 里的 id 或 label。',
+    '- action 只能是：holding / picking_up / putting_down / using / touching / looking_at / near。',
+    '- description：简短中文或英文，说明这次交互。',
+    '只有真实发生的人-物交互才写入 interactions；只是出现在画面里不算交互。',
+    '【所属判断】不要直接断言所有权。除非多次交互，否则只能视为 possibly uses。SCENE_MEMORY.relations 里 status=confirmed 的可当作已确认，status=rejected 的绝对不要再断言属于该用户。',
     'interruptibility 只能是 low / medium / high。robot_action 只能是 observe / soft_checkin / wait / encourage_break。',
-    'JSON 字段：person_activity, objects, interactions, action_change, interruptibility, reason, robot_action。objects 可以是字符串，也可以是 {id,label}。',
+    '顶层 JSON 字段：person_activity, objects, interactions, action_change, interruptibility, reason, robot_action。',
   ].join('\n');
   const frameTimes = frames.map((frame, index) => `frame_${index + 1}_time=${frame.time || 'unknown'}`).join('\n');
   const frameContent = frames.map(frame => toMessagesImageContent(frame.image));
@@ -477,6 +522,23 @@ function buildVisionPayload(frames, snapshot, sceneMemory) {
           content: [
             { type: 'text', text: `${instruction}\n${frameTimes}\nSNAPSHOT=${JSON.stringify(snapshot)}\nSCENE_MEMORY=${JSON.stringify(sceneMemory)}` },
             ...frameContent,
+          ],
+        },
+      ],
+      temperature: 0.2,
+      max_tokens: Math.min(maxTokens, 1200),
+    };
+  }
+
+  if (usesChatCompletions()) {
+    return {
+      model,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: `${instruction}\n${frameTimes}\nSNAPSHOT=${JSON.stringify(snapshot)}\nSCENE_MEMORY=${JSON.stringify(sceneMemory)}` },
+            ...frames.map(frame => toOpenAIImageUrlContent(frame.image)),
           ],
         },
       ],
@@ -518,6 +580,40 @@ function toMessagesImageContent(dataUrl) {
   };
 }
 
+// OpenAI / AIHubMix chat.completions 视觉格式（见 docs.aihubmix.com vision API）
+function toOpenAIImageUrlContent(dataUrl) {
+  return {
+    type: 'image_url',
+    image_url: { url: String(dataUrl), detail: 'low' },
+  };
+}
+
+function parseVlmApiError(detail, status) {
+  let parsed = null;
+  try {
+    const outer = JSON.parse(detail);
+    parsed = outer?.error?.error || outer?.error || outer;
+  } catch {
+    parsed = null;
+  }
+  const message = String(parsed?.message || detail || `HTTP ${status}`).slice(0, 400);
+  const type = String(parsed?.type || parsed?.code || '').toLowerCase();
+  const lower = message.toLowerCase();
+  let code = 'vlm_api_error';
+  let hint = '检查 .env 里的 LLM_API_KEY、LLM_MODEL、LLM_BASE_URL 是否正确。';
+  if (lower.includes('quota') || lower.includes('billing') || type.includes('insufficient_quota')) {
+    code = 'openai_quota_exceeded';
+    hint = 'OpenAI 账户余额/配额用尽。请到 platform.openai.com → Billing 充值或绑定支付方式，或换一个有额度的 API Key。';
+  } else if (status === 401 || lower.includes('invalid api key') || lower.includes('incorrect api key')) {
+    code = 'invalid_api_key';
+    hint = 'API Key 无效或已作废。请在 OpenAI 后台新建 Key 并更新 .env 中的 LLM_API_KEY，然后重启 start.ps1。';
+  } else if (status === 429 || lower.includes('rate limit')) {
+    code = 'rate_limited';
+    hint = '请求过于频繁，稍等 1 分钟后会自动重试。';
+  }
+  return { code, message, hint, httpStatus: status };
+}
+
 function parseSceneJson(text, snapshot) {
   try {
     const cleaned = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
@@ -528,11 +624,58 @@ function parseSceneJson(text, snapshot) {
   }
 }
 
+const INTERACTION_ACTIONS = ['holding', 'picking_up', 'putting_down', 'using', 'touching', 'looking_at', 'near'];
+
+function clamp01(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return Math.min(1, Math.max(0, num));
+}
+
+function normalizeBboxNorm(bbox) {
+  if (!Array.isArray(bbox) || bbox.length < 4) return null;
+  const x = clamp01(bbox[0]);
+  const y = clamp01(bbox[1]);
+  const w = clamp01(bbox[2]);
+  const h = clamp01(bbox[3]);
+  if (w <= 0 || h <= 0) return null;
+  return [Number(x.toFixed(4)), Number(y.toFixed(4)), Number(Math.min(w, 1 - x).toFixed(4)), Number(Math.min(h, 1 - y).toFixed(4))];
+}
+
+function normalizeSceneObject(object) {
+  if (typeof object === 'string') {
+    return { id: null, label: object.trim().toLowerCase(), visual_description: '', bbox_norm: null, state: 'present' };
+  }
+  if (!object || typeof object !== 'object') return null;
+  const label = String(object.label || object.name || '').trim().toLowerCase();
+  if (!label) return null;
+  return {
+    id: object.id ? String(object.id) : null,
+    label,
+    visual_description: String(object.visual_description || object.description || '').slice(0, 120),
+    bbox_norm: normalizeBboxNorm(object.bbox_norm || object.bbox),
+    state: object.state === 'gone' ? 'gone' : 'present',
+  };
+}
+
+function normalizeSceneInteraction(interaction) {
+  if (typeof interaction === 'string') {
+    return { object: '', action: 'near', description: interaction.slice(0, 160) };
+  }
+  if (!interaction || typeof interaction !== 'object') return null;
+  const action = INTERACTION_ACTIONS.includes(interaction.action) ? interaction.action : 'near';
+  return {
+    object: String(interaction.object || interaction.target || '').slice(0, 60),
+    action,
+    description: String(interaction.description || interaction.summary || '').slice(0, 160),
+  };
+}
+
 function normalizeScene(scene) {
   return {
     person_activity: String(scene.person_activity || 'unknown'),
-    objects: Array.isArray(scene.objects) ? scene.objects.map(object => typeof object === 'string' ? object : (object.label || object.name || object.id || JSON.stringify(object))).slice(0, 12) : [],
-    interactions: Array.isArray(scene.interactions) ? scene.interactions.map(String).slice(0, 8) : [],
+    objects: Array.isArray(scene.objects) ? scene.objects.map(normalizeSceneObject).filter(Boolean).slice(0, 12) : [],
+    interactions: Array.isArray(scene.interactions) ? scene.interactions.map(normalizeSceneInteraction).filter(Boolean).slice(0, 10) : [],
     action_change: String(scene.action_change || ''),
     interruptibility: ['low', 'medium', 'high'].includes(scene.interruptibility) ? scene.interruptibility : 'medium',
     reason: String(scene.reason || ''),
@@ -619,7 +762,12 @@ function sendJson(response, status, payload) {
 
 server.listen(port, '127.0.0.1', () => {
   console.log(`HRI demo server listening at http://127.0.0.1:${port}/`);
-  console.log(apiKey ? `LLM enabled with ${model} at ${baseUrl}/${wireApi}` : 'OPENAI_API_KEY not set; using local fallback replies.');
+  if (apiKey) {
+    console.log(`VLM/LLM enabled: ${model} @ ${baseUrl}/${wireApi}`);
+  } else {
+    console.log('VLM/LLM NOT configured — scene understanding will NOT detect objects.');
+    console.log('Fix: edit .env — set LLM_API_KEY + a vision-capable model (e.g. gpt-4o), restart start.ps1');
+  }
   if (pythonRuntime.insightfaceReady) {
     console.log(`InsightFace ready via "${pythonRuntime.bin}" (${pythonRuntime.executable || 'path unknown'})`);
   } else {
@@ -627,6 +775,34 @@ server.listen(port, '127.0.0.1', () => {
     console.log('Fix: in the same terminal, run: python -m pip install insightface opencv-python onnxruntime');
   }
 });
+
+async function loadEnvFile(path) {
+  try {
+    const text = await readFile(path, 'utf8');
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq <= 0) continue;
+      const key = trimmed.slice(0, eq).trim();
+      let value = trimmed.slice(eq + 1).trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      if (!(key in process.env)) process.env[key] = value;
+    }
+  } catch {
+    // no .env file
+  }
+}
+
+function resolveApiKey(raw) {
+  const key = String(raw || '').trim();
+  if (!key) return '';
+  if (/^(sk-your-key|sk-your-openai-key|your-key|changeme|placeholder)$/i.test(key)) return '';
+  if (key === 'sk-...') return '';
+  return key;
+}
 
 async function loadCodexApiKey() {
   try {
