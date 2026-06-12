@@ -7,6 +7,7 @@ import { access } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 
 const root = process.cwd();
+const pythonCacheDir = join(root, '.python-cache');
 await loadEnvFile(join(root, '.env'));
 const port = Number(process.env.PORT || 8173);
 const codexConfig = await loadCodexProvider();
@@ -51,6 +52,30 @@ const server = createServer(async (request, response) => {
       await handleFaceMatch(request, response);
       return;
     }
+    if (request.method === 'POST' && url.pathname === '/api/identity/face/match-multi') {
+      await handleFaceMatchMulti(request, response);
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/identity/face/detect-frame') {
+      await handleFaceDetectFrame(request, response);
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/emotion/face') {
+      await handleEmotionFace(request, response);
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/emotion/faces') {
+      await handleEmotionFaces(request, response);
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/emotion/voice') {
+      await handleEmotionVoice(request, response);
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/audio/diarize') {
+      await handleSpeechDiarize(request, response);
+      return;
+    }
     if (request.method === 'GET' && url.pathname === '/favicon.ico') {
       response.writeHead(204);
       response.end();
@@ -63,6 +88,20 @@ const server = createServer(async (request, response) => {
         pythonPath: pythonRuntime.executable,
         insightfaceReady: pythonRuntime.insightfaceReady,
         insightfaceDetail: pythonRuntime.detail,
+        faceEmotionReady: emotionRuntime.faceEmotionReady,
+        voiceEmotionReady: emotionRuntime.voiceEmotionReady,
+        emotionFaceModel: emotionRuntime.faceModel,
+        emotionVoiceModel: emotionRuntime.voiceModel,
+        emotionProbed: emotionRuntime.probed,
+        diarizationReady: emotionRuntime.diarizationReady,
+        diarizationDetail: emotionRuntime.diarizationDetail,
+        yoloFaceReady: emotionRuntime.yoloFaceReady,
+        faceDetectorMode: emotionRuntime.faceDetectorMode,
+        persistentWorkerReady: emotionRuntime.persistentWorkerReady,
+        emotionFusion: emotionRuntime.emotionFusion,
+        serProviderLabel: emotionRuntime.serProviderLabel,
+        faceProvider: emotionRuntime.faceProvider,
+        voiceProvider: emotionRuntime.voiceProvider,
         llmConfigured: Boolean(apiKey),
         llmModel: model,
         llmBaseUrl: baseUrl,
@@ -128,7 +167,7 @@ async function handleChat(request, response) {
 async function handleVoiceEnroll(request, response) {
   const body = await readBody(request);
   const payload = JSON.parse(body || '{}');
-  const worker = await runIdentityWorker({ task: 'voice_embedding', audio: payload.audio || '' });
+  const worker = await runWorker({ task: 'voice_embedding', audio: payload.audio || '' });
   sendJson(response, 200, worker);
 }
 
@@ -147,7 +186,7 @@ async function handleIdentityEnroll(request, response) {
     });
     return;
   }
-  const worker = await runIdentityWorker({ task: 'face_embedding', image: faceCrop });
+  const worker = await runWorker({ task: 'face_embedding', image: faceCrop });
   if (worker.ok) {
     sendJson(response, 200, worker);
     return;
@@ -176,7 +215,7 @@ async function handleFaceMatch(request, response) {
     });
     return;
   }
-  const worker = await runIdentityWorker({ task: 'face_embedding', image: faceCrop });
+  const worker = await runWorker({ task: 'face_embedding', image: faceCrop });
   if (!worker.ok) {
     sendJson(response, 200, {
       ok: false,
@@ -224,6 +263,178 @@ async function handleFaceMatch(request, response) {
   });
 }
 
+function rankFaceCandidates(query, candidates, threshold) {
+  const matches = candidates
+    .map(candidate => {
+      const embeddings = Array.isArray(candidate.embeddings) ? candidate.embeddings : [];
+      let bestScore = 0;
+      let bestSampleIndex = -1;
+      embeddings.forEach((embedding, index) => {
+        const score = cosineSimilarity(query, embedding);
+        if (score > bestScore) {
+          bestScore = score;
+          bestSampleIndex = index;
+        }
+      });
+      if (!embeddings.length) return null;
+      return {
+        personId: String(candidate.personId || ''),
+        name: String(candidate.name || ''),
+        score: Number(bestScore.toFixed(4)),
+        bestSampleIndex,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
+  const top = matches[0];
+  return {
+    matches,
+    matched: Boolean(top && top.score >= threshold),
+    personId: top?.personId || '',
+    score: top?.score || 0,
+  };
+}
+
+async function handleFaceMatchMulti(request, response) {
+  const body = await readBody(request);
+  const payload = JSON.parse(body || '{}');
+  const threshold = Number(payload.threshold || process.env.FACE_MATCH_THRESHOLD || 0.45);
+  const crops = Array.isArray(payload.crops) ? payload.crops : [];
+  const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+  if (!crops.length) {
+    sendJson(response, 200, {
+      ok: false,
+      provider: 'insightface_arcface',
+      error: 'no_crops',
+      results: [],
+    });
+    return;
+  }
+  const worker = await runWorker({
+    task: 'face_embeddings_batch',
+    crops: crops.map(item => ({
+      faceId: String(item.faceId || item.id || ''),
+      faceCrop: String(item.faceCrop || item.image || ''),
+    })).filter(item => item.faceCrop.startsWith('data:image/')),
+  });
+  if (!worker.ok) {
+    sendJson(response, 200, {
+      ok: false,
+      provider: worker.provider || 'insightface_arcface',
+      error: worker.error || 'batch_failed',
+      detail: worker.detail || '',
+      results: [],
+    });
+    return;
+  }
+  const results = (worker.faces || []).map(face => {
+    if (!face.ok) {
+      return {
+        faceId: face.faceId,
+        ok: false,
+        error: face.error || 'no_face',
+        matched: false,
+        personId: '',
+        score: 0,
+        matches: [],
+      };
+    }
+    const ranked = rankFaceCandidates(face.embedding || [], candidates, threshold);
+    return {
+      faceId: face.faceId,
+      ok: true,
+      detScore: face.det_score,
+      matched: ranked.matched,
+      personId: ranked.personId,
+      score: ranked.score,
+      matches: ranked.matches,
+    };
+  });
+  sendJson(response, 200, {
+    ok: true,
+    provider: worker.provider || 'insightface_arcface',
+    threshold,
+    results,
+  });
+}
+
+async function handleFaceDetectFrame(request, response) {
+  const body = await readBody(request);
+  const payload = JSON.parse(body || '{}');
+  const frame = String(payload.frame || payload.image || '');
+  if (!frame.startsWith('data:image/')) {
+    sendJson(response, 200, {
+      ok: false,
+      provider: 'insightface_arcface',
+      error: 'no_frame',
+      faces: [],
+    });
+    return;
+  }
+  const worker = await runWorker({ task: 'face_detect_frame', frame });
+  sendJson(response, 200, worker);
+}
+
+async function handleEmotionFace(request, response) {
+  const body = await readBody(request);
+  const payload = JSON.parse(body || '{}');
+  const faceCrop = String(payload.faceCrop || payload.image || '');
+  if (!faceCrop.startsWith('data:image/')) {
+    sendJson(response, 200, {
+      ok: false,
+      provider: 'vit_fer',
+      error: 'no_face_crop',
+      detail: 'Send a MediaPipe face crop as faceCrop (data URL).',
+    });
+    return;
+  }
+  const worker = await runWorker({ task: 'face_emotion', image: faceCrop });
+  sendJson(response, 200, worker);
+}
+
+async function handleEmotionFaces(request, response) {
+  const body = await readBody(request);
+  const payload = JSON.parse(body || '{}');
+  const crops = Array.isArray(payload.crops) ? payload.crops : [];
+  if (!crops.length) {
+    sendJson(response, 200, { ok: false, provider: 'vit_fer', error: 'no_crops', faces: [] });
+    return;
+  }
+  const worker = await runWorker({
+    task: 'faces_emotion_batch',
+    crops: crops.map(item => ({
+      faceId: String(item.faceId || item.id || ''),
+      faceCrop: String(item.faceCrop || item.image || ''),
+    })).filter(item => item.faceCrop.startsWith('data:image/')),
+  });
+  sendJson(response, 200, worker);
+}
+
+async function handleEmotionVoice(request, response) {
+  const body = await readBody(request);
+  const payload = JSON.parse(body || '{}');
+  const audio = String(payload.audio || '');
+  if (!audio.startsWith('data:')) {
+    sendJson(response, 200, { ok: false, provider: 'wavlm_ser', error: 'no_audio', detail: 'Send a recorded clip as a data URL.' });
+    return;
+  }
+  const worker = await runWorker({ task: 'voice_emotion', audio });
+  sendJson(response, 200, worker);
+}
+
+async function handleSpeechDiarize(request, response) {
+  const body = await readBody(request);
+  const payload = JSON.parse(body || '{}');
+  const audio = String(payload.audio || '');
+  if (!audio.startsWith('data:')) {
+    sendJson(response, 200, { ok: false, provider: 'pyannote_3.1', error: 'no_audio', detail: 'Send a recorded clip as a data URL.' });
+    return;
+  }
+  const worker = await runWorker({ task: 'speech_diarization', audio });
+  sendJson(response, 200, worker);
+}
+
 function cosineSimilarity(a, b) {
   const left = Array.isArray(a) ? a.map(Number) : [];
   const right = Array.isArray(b) ? b.map(Number) : [];
@@ -241,6 +452,45 @@ function cosineSimilarity(a, b) {
 }
 
 const pythonRuntime = await detectPythonRuntime();
+
+// 情绪模型依赖较重(尤其 transformers)，不在启动时阻塞。后台探测一次，结果缓存给 /api/health。
+const emotionRuntime = {
+  probed: false,
+  faceEmotionReady: false,
+  voiceEmotionReady: false,
+  diarizationReady: false,
+  diarizationDetail: 'probing',
+  yoloFaceReady: false,
+  faceDetectorMode: process.env.FACE_DETECTOR || 'insightface',
+  persistentWorkerReady: false,
+  faceModel: process.env.EMOTION_FACE_MODEL || 'trpakov/vit-face-expression',
+  voiceModel: process.env.SER_MODEL || 'jihedjabnoun/wavlm-base-emotion',
+  faceProvider: 'vit_fer',
+  voiceProvider: 'wavlm_ser',
+  serProviderLabel: 'WavLM · SER',
+  emotionFusion: 'mdat',
+};
+
+async function probeEmotionRuntime() {
+  if (!pythonRuntime.bin) return;
+  const result = await runWorker({ task: 'emotion_probe' });
+  if (result && result.ok) {
+    emotionRuntime.faceEmotionReady = Boolean(result.faceEmotionReady);
+    emotionRuntime.voiceEmotionReady = Boolean(result.voiceEmotionReady);
+    emotionRuntime.diarizationReady = Boolean(result.diarizationReady);
+    if (result.diarizationDetail) emotionRuntime.diarizationDetail = result.diarizationDetail;
+    emotionRuntime.yoloFaceReady = Boolean(result.yoloFaceReady);
+    if (result.faceDetectorMode) emotionRuntime.faceDetectorMode = result.faceDetectorMode;
+    if (result.emotionFusion) emotionRuntime.emotionFusion = result.emotionFusion;
+    if (result.faceProvider) emotionRuntime.faceProvider = result.faceProvider;
+    if (result.voiceProvider) emotionRuntime.voiceProvider = result.voiceProvider;
+    if (result.serProviderLabel) emotionRuntime.serProviderLabel = result.serProviderLabel;
+    if (result.faceModel) emotionRuntime.faceModel = result.faceModel;
+    if (result.voiceModel) emotionRuntime.voiceModel = result.voiceModel;
+  }
+  emotionRuntime.persistentWorkerReady = Boolean(persistentWorker?.child && !persistentWorker.child.killed);
+  emotionRuntime.probed = true;
+}
 
 function pythonCandidates() {
   const fromEnv = process.env.PYTHON_BIN ? [process.env.PYTHON_BIN] : [];
@@ -316,7 +566,12 @@ function runIdentityWorker(payload) {
     const child = spawn(bin, ['identity_worker.py'], {
       cwd: root,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, FACE_MODEL_NAME: process.env.FACE_MODEL_NAME || 'buffalo_s' },
+      env: {
+        ...process.env,
+        FACE_MODEL_NAME: process.env.FACE_MODEL_NAME || 'buffalo_s',
+        PYTHONNOUSERSITE: process.env.PYTHONNOUSERSITE || '1',
+        PYTHONPYCACHEPREFIX: process.env.PYTHONPYCACHEPREFIX || pythonCacheDir,
+      },
     });
     let stdout = '';
     let stderr = '';
@@ -351,6 +606,91 @@ function runIdentityWorker(payload) {
     });
     child.stdin.end(JSON.stringify(payload));
   });
+}
+
+let persistentWorker = null;
+let persistentWorkerNextId = 1;
+const persistentWorkerPending = new Map();
+
+function identityWorkerEnv() {
+  return {
+    ...process.env,
+    FACE_MODEL_NAME: process.env.FACE_MODEL_NAME || 'buffalo_s',
+    PYTHONNOUSERSITE: process.env.PYTHONNOUSERSITE || '1',
+    PYTHONPYCACHEPREFIX: process.env.PYTHONPYCACHEPREFIX || pythonCacheDir,
+  };
+}
+
+function startPersistentWorker() {
+  if (persistentWorker?.child && !persistentWorker.child.killed) return persistentWorker;
+  const bin = pythonRuntime.bin;
+  const child = spawn(bin, ['identity_worker.py', '--jsonl'], {
+    cwd: root,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: identityWorkerEnv(),
+  });
+  persistentWorker = { child, buffer: '', stderr: '' };
+  child.stdout.on('data', chunk => {
+    persistentWorker.buffer += chunk.toString();
+    const lines = persistentWorker.buffer.split('\n');
+    persistentWorker.buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let parsed;
+      try { parsed = JSON.parse(line); } catch { continue; }
+      const id = parsed._id;
+      const pending = persistentWorkerPending.get(id);
+      if (!pending) continue;
+      clearTimeout(pending.timer);
+      persistentWorkerPending.delete(id);
+      delete parsed._id;
+      pending.resolve({ ...parsed, python: bin, stderr: persistentWorker.stderr.slice(-240) });
+    }
+  });
+  child.stderr.on('data', chunk => { persistentWorker.stderr += chunk.toString(); });
+  child.on('close', () => {
+    for (const pending of persistentWorkerPending.values()) {
+      clearTimeout(pending.timer);
+      pending.resolve({ ok: false, error: 'persistent_worker_exited', detail: persistentWorker?.stderr?.slice(-500) || '', python: bin });
+    }
+    persistentWorkerPending.clear();
+    persistentWorker = null;
+    emotionRuntime.persistentWorkerReady = false;
+  });
+  emotionRuntime.persistentWorkerReady = true;
+  return persistentWorker;
+}
+
+function runPersistentWorker(payload) {
+  return new Promise(resolve => {
+    const worker = startPersistentWorker();
+    const id = persistentWorkerNextId++;
+    const timeoutMs = payload.task === 'emotion_probe'
+      ? Number(process.env.IDENTITY_TIMEOUT_MS || 180000)
+      : Number(process.env.EMOTION_TIMEOUT_MS || 90000);
+    const timer = setTimeout(() => {
+      persistentWorkerPending.delete(id);
+      resolve({ ok: false, error: 'persistent_worker_timeout', detail: worker.stderr.slice(-500), python: pythonRuntime.bin });
+    }, timeoutMs);
+    persistentWorkerPending.set(id, { resolve, timer });
+    worker.child.stdin.write(`${JSON.stringify({ ...payload, _id: id })}\n`);
+  });
+}
+
+function runWorker(payload) {
+  if (process.env.USE_PERSISTENT_WORKER === '0') {
+    return runIdentityWorker(payload);
+  }
+  return runPersistentWorker(payload).then(result => {
+    if (result.error === 'persistent_worker_exited' || result.error === 'persistent_worker_timeout') {
+      return runIdentityWorker(payload);
+    }
+    return result;
+  });
+}
+
+function runPersistentEmotionWorker(payload) {
+  return runPersistentWorker(payload);
 }
 
 function normalizeVector(values) {
@@ -428,6 +768,7 @@ function buildLlmPayload(text, snapshot, messages) {
     '你是一个 embodied relationship agent 的 demo 后端。',
     '目标：低侵入、体贴、可解释、有边界。',
     '不要声称诊断情绪或心理疾病。只基于互动状态、用户话语和关系记忆给陪伴式回应。',
+    'interactionSnapshot.affect 是多模态情绪信号(面部+语音融合的 valence/arousal 与离散标签)，只能当作语气线索来温和调整回应；绝对不要把标签念出来或断言“你现在很伤心/很生气”。',
     '回复中文，1-3 句，具体、温和、给用户选择权。',
     'interactionSnapshot.sceneMemory 是实例级关系图谱：可引用 objects（物体实例）和 relations（人-物关系）。',
     'relations 里 status=confirmed 表示用户已确认所属，可以放心引用；status=rejected 表示用户否认，绝不要再说这东西属于他。',
@@ -491,14 +832,18 @@ function normalizeVisionFrames(payload) {
 function buildVisionPayload(frames, snapshot, sceneMemory) {
   const instruction = [
     '你是 HRI 机器人实时场景理解模块，负责维护实例级关系图谱。',
-    '你会收到最近约 9-10 秒内按时间顺序采样的 3 张图片，以及传感器 snapshot 和已有 SCENE_MEMORY。',
+    '你会收到最近约 6-8 秒内按时间顺序采样的 3 张图片，以及传感器 snapshot 和已有 SCENE_MEMORY。',
     '只根据这些图片、snapshot 和 SCENE_MEMORY，输出严格 JSON，不要 Markdown，不要解释。',
     '不要诊断情绪。只描述人在这段时间里做了什么、可见物体实例、人-物交互、动作变化、是否适合打断。',
-    '【实例级要求】objects 必须是数组，每个元素是对象：{id, label, visual_description, bbox_norm, state}。',
+    '【实例级要求】objects 必须是数组，每个元素是对象：{id, label, visual_description, frame_index, bbox_norm, state}。',
     '- id：如果 SCENE_MEMORY.objects 里已有同一个具体物体（看外观/位置判断，不只看类别），复用其 id（如 obj_3）；否则填 null 表示新实例。',
     '- label：物体类别英文小写，如 cup / mug / laptop / phone。',
+    '- 特别关注人的手里、脸旁、桌面前景的小物体，即使很小也要尝试识别；包括 comb / hair comb / brush / pen / pencil / toothbrush / remote control / keys / glasses / earbuds / small tool / accessory。',
+    '- 如果手部附近有细长、有齿、有柄、黑色/白色小工具，请优先考虑 comb / hair comb / brush，而不是忽略。',
+    '- 如果物体不在常见 COCO 类别里，也要用最具体的开放类别 label，例如看到梳子就写 comb，不要退化成 object。',
     '- visual_description：颜色+材质+特征，用于区分同类不同实例，如 "white ceramic mug with handle"。',
-    '- bbox_norm：[x, y, w, h]，取值 0~1 的归一化坐标（相对整帧），用于裁剪缩略图与位置匹配。尽量给准确框。',
+    '- frame_index：这个 bbox 所在图片序号，只能是 1/2/3；必须选择你实际看见该物体且 bbox 最准确的那一帧。',
+    '- bbox_norm：必须是 [x, y, w, h]，不是 [x1,y1,x2,y2]；取值 0~1，相对 frame_index 对应整帧，用于裁剪缩略图与位置匹配。尽量给准确框。',
     '- state：present 或 gone。',
     '同一类别但外观不同的两个物体（例如白色马克杯和透明玻璃杯）必须是两个不同元素、不同 id。',
     '【交互要求】interactions 必须是数组，每个元素是对象：{object, action, description}。',
@@ -636,8 +981,12 @@ function normalizeBboxNorm(bbox) {
   if (!Array.isArray(bbox) || bbox.length < 4) return null;
   const x = clamp01(bbox[0]);
   const y = clamp01(bbox[1]);
-  const w = clamp01(bbox[2]);
-  const h = clamp01(bbox[3]);
+  let w = clamp01(bbox[2]);
+  let h = clamp01(bbox[3]);
+  if (bbox[2] > bbox[0] && bbox[3] > bbox[1] && (bbox[2] > 0.65 || bbox[3] > 0.65 || bbox[2] + x > 1.05 || bbox[3] + y > 1.05)) {
+    w = clamp01(bbox[2] - bbox[0]);
+    h = clamp01(bbox[3] - bbox[1]);
+  }
   if (w <= 0 || h <= 0) return null;
   return [Number(x.toFixed(4)), Number(y.toFixed(4)), Number(Math.min(w, 1 - x).toFixed(4)), Number(Math.min(h, 1 - y).toFixed(4))];
 }
@@ -654,6 +1003,7 @@ function normalizeSceneObject(object) {
     label,
     visual_description: String(object.visual_description || object.description || '').slice(0, 120),
     bbox_norm: normalizeBboxNorm(object.bbox_norm || object.bbox),
+    frame_index: Math.min(3, Math.max(1, Number(object.frame_index || object.frame || object.frameIndex || 3) || 3)),
     state: object.state === 'gone' ? 'gone' : 'present',
   };
 }
@@ -774,6 +1124,16 @@ server.listen(port, '127.0.0.1', () => {
     console.log(`InsightFace NOT ready: ${pythonRuntime.detail}`);
     console.log('Fix: in the same terminal, run: python -m pip install insightface opencv-python onnxruntime');
   }
+  probeEmotionRuntime()
+    .then(() => {
+      console.log(`Emotion models — face(ViT-FER): ${emotionRuntime.faceEmotionReady ? 'ready' : 'NOT ready'} · voice(WavLM SER): ${emotionRuntime.voiceEmotionReady ? 'ready' : 'NOT ready'} (${emotionRuntime.serProviderLabel}) · fusion(MDAT)`);
+      console.log(`Diarization — ${emotionRuntime.diarizationReady ? 'pyannote 3.1 ready' : emotionRuntime.diarizationDetail || 'pyannote not configured'}`);
+      console.log(`Python worker — ${emotionRuntime.persistentWorkerReady ? 'persistent JSONL ready' : 'spawn-per-request fallback'}`);
+      if (!emotionRuntime.faceEmotionReady || !emotionRuntime.voiceEmotionReady) {
+        console.log('Fix (optional): see .env.example INSTALL block — pip install torch torchaudio transformers pillow opencv-python');
+      }
+    })
+    .catch(() => {});
 });
 
 async function loadEnvFile(path) {

@@ -687,6 +687,104 @@ strong { display: block; margin-top: 8px; }
   box-shadow: 0 0 24px rgba(123,223,242,.12);
 }
 
+.object-hud {
+  position: absolute;
+  left: 14px;
+  top: 64px;
+  z-index: 4;
+  width: min(260px, calc(100% - 28px));
+  max-height: min(44vh, 280px);
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 189, 102, 0.32);
+  border-radius: 16px;
+  background: rgba(15, 16, 22, 0.72);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.35;
+  box-shadow: 0 18px 42px rgba(0,0,0,.24);
+  backdrop-filter: blur(18px);
+}
+
+.object-hud strong {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--amber);
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.object-hud span {
+  color: var(--muted);
+}
+
+.object-hud ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.object-hud li {
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.object-hud img,
+.object-hud i {
+  width: 34px;
+  height: 26px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: rgba(255,255,255,.08);
+}
+
+.object-hud li span {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.emo-score-grid {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.emo-score-row {
+  display: grid;
+  grid-template-columns: 44px 1fr 34px;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.emo-score-row i {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255,255,255,.10);
+}
+
+.emo-score-row b {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #7bdff2, #b69cff, #ffbd66);
+}
+
+.emo-score-row em {
+  font-style: normal;
+  text-align: right;
+  color: var(--text);
+}
+
 .blendshape-card {
   grid-column: span 1;
 }
@@ -899,6 +997,75 @@ strong { display: block; margin-top: 8px; }
 .graph-object-body strong { font-size: 12px; }
 .graph-object-body span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
 .graph-object-meta { font-size: 11px; }
+.graph-object-debug {
+  display: block;
+  font-size: 10px;
+  color: rgba(123, 223, 242, 0.85);
+  margin-top: 2px;
+}
+.graph-object-debug.warn { color: rgba(255, 122, 144, 0.9); }
+
+.debug-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.debug-toggles label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.diarization-card .dia-status {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+.dia-segments {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dia-seg {
+  display: grid;
+  grid-template-columns: 72px 1fr 36px;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.dia-seg i {
+  display: block;
+  height: 8px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, rgba(123, 223, 242, 0.85), rgba(162, 245, 191, 0.75));
+}
+.dia-spk-0 i { background: linear-gradient(90deg, rgba(123, 223, 242, 0.9), rgba(123, 223, 242, 0.55)); }
+.dia-spk-1 i { background: linear-gradient(90deg, rgba(162, 245, 191, 0.9), rgba(162, 245, 191, 0.55)); }
+.dia-spk-2 i { background: linear-gradient(90deg, rgba(255, 189, 102, 0.9), rgba(255, 189, 102, 0.55)); }
+.dia-spk-3 i { background: linear-gradient(90deg, rgba(199, 146, 255, 0.9), rgba(199, 146, 255, 0.55)); }
+.dia-spk-4 i { background: linear-gradient(90deg, rgba(255, 122, 144, 0.9), rgba(255, 122, 144, 0.55)); }
+.dia-spk-5 i { background: linear-gradient(90deg, rgba(127, 200, 255, 0.9), rgba(127, 200, 255, 0.55)); }
+.dia-spk-0 .dia-speaker { color: #7bdff2; }
+.dia-spk-1 .dia-speaker { color: #a2f5bf; }
+.dia-spk-2 .dia-speaker { color: #ffbd66; }
+.dia-spk-3 .dia-speaker { color: #c792ff; }
+.dia-spk-4 .dia-speaker { color: #ff7a90; }
+.dia-spk-5 .dia-speaker { color: #7fc8ff; }
+.dia-speaker {
+  color: var(--text);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dia-empty {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0;
+}
 
 .graph-relations {
   display: grid;
@@ -1240,10 +1407,10 @@ body {
 .grid {
   grid-template-columns: 360px minmax(620px, 1fr) 390px;
   grid-template-areas:
-    "identity video scene"
-    "memory video sceneMemory"
-    "state video strategy"
-    "face video strategy";
+    "emotion video sceneMemory"
+    "state   video scene"
+    "memory  video strategy"
+    "face    video strategy";
   gap: 14px;
   margin-top: 14px;
 }
@@ -1252,14 +1419,17 @@ body {
   grid-area: video;
   position: sticky;
   top: 14px;
+  align-self: start;
   padding: 14px !important;
   border-radius: 36px;
-  min-height: calc(100vh - 120px);
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
+  gap: 14px;
+  /* 不透明渐变背景 + 关闭 backdrop blur：sticky 元素叠加 backdrop-filter 会在滚动时撕裂闪烁。 */
+  backdrop-filter: none;
   background:
-    linear-gradient(180deg, rgba(255,255,255,.14), rgba(255,255,255,.055)),
+    linear-gradient(180deg, rgba(36, 30, 44, 0.92), rgba(22, 18, 28, 0.92)),
     radial-gradient(circle at 50% 15%, rgba(123,223,242,.2), transparent 46%);
 }
 
@@ -1276,14 +1446,17 @@ body {
 }
 
 .video-wrap {
-  flex: 1;
-  min-height: 620px;
+  flex: none;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 0;
   border-radius: 30px;
 }
 
 video,
 canvas {
-  min-height: 620px;
+  min-height: 0;
+  height: 100%;
 }
 
 .scene-card,
@@ -1292,11 +1465,13 @@ canvas {
 .memory-card,
 .strategy-card,
 .state-card,
+.emotion-card,
 .blendshape-card {
   border-radius: 24px;
   background:
     linear-gradient(180deg, rgba(255,255,255,.105), rgba(255,255,255,.05));
 }
+
 
 .scene-card {
   grid-area: scene;
@@ -1321,6 +1496,7 @@ canvas {
 }
 .state-card { grid-area: state; }
 .blendshape-card { grid-area: face; }
+.emotion-card { grid-area: emotion; }
 
 .section-title {
   gap: 10px;
@@ -1463,15 +1639,16 @@ canvas {
     grid-template-columns: 320px minmax(520px, 1fr);
     grid-template-areas:
       "video video"
-      "identity scene"
-      "memory sceneMemory"
-      "state strategy"
+      "emotion sceneMemory"
+      "state scene"
+      "memory strategy"
       "face strategy";
   }
 
   .perception-card {
     position: static;
     min-height: auto;
+    align-self: stretch;
   }
 
   .video-wrap,
@@ -1486,9 +1663,9 @@ canvas {
     grid-template-columns: 1fr;
     grid-template-areas:
       "video"
+      "emotion"
       "scene"
       "sceneMemory"
-      "identity"
       "strategy"
       "memory"
       "state"
@@ -1517,4 +1694,362 @@ canvas {
   .composer {
     grid-template-columns: 1fr;
   }
+}
+
+/* ===================== 多模态情绪信号面板 ===================== */
+.emo-disclaimer {
+  color: var(--amber);
+  font-weight: 700;
+}
+
+.emotion-grid {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.9fr) minmax(150px, 1.1fr);
+  gap: 16px;
+  margin-top: 14px;
+  align-items: center;
+}
+
+.emo-fusion,
+.emo-va {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.emo-ring {
+  width: 100%;
+  max-width: 168px;
+  height: auto;
+}
+
+.emo-ring #emoRingArc {
+  transition: stroke-dasharray 0.9s ease, stroke 0.6s ease, stroke-width 0.6s ease;
+  filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.25));
+}
+
+.emo-va-plot {
+  width: 100%;
+  max-width: 220px;
+  height: auto;
+}
+
+.emo-va-plot #emoVADot {
+  transition: cx 0.9s ease, cy 0.9s ease, fill 0.6s ease, opacity 0.6s ease;
+  filter: drop-shadow(0 0 5px rgba(182, 156, 255, 0.6));
+}
+
+.emo-fusion-cap {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.emo-modalities {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.emo-modality {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: var(--panel-strong);
+}
+
+.emo-modality-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.emo-modality-head strong {
+  font-size: 13px;
+}
+
+.emo-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.emo-badge.ok {
+  color: #0f1a12;
+  background: var(--green);
+}
+
+.emo-badge.warn {
+  color: #1a140c;
+  background: var(--amber);
+}
+
+.emo-modality-body {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.emo-modality-emotion {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.emo-modality-conf {
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 34px;
+  text-align: right;
+}
+
+.emo-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.emo-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--cyan), var(--violet));
+  transition: width 0.8s ease;
+}
+
+.emo-modality-meta {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.emo-multi-face-list {
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.emo-multi-title {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.emo-multi-row {
+  display: grid;
+  grid-template-columns: 1.2fr 0.55fr 0.9fr 0.55fr 0.65fr;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  padding: 4px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.emo-multi-row:first-of-type {
+  border-top: none;
+}
+
+.emo-multi-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.emo-multi-src {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.emo-multi-emo {
+  color: var(--cyan);
+  font-weight: 600;
+}
+
+.emo-multi-conf {
+  color: var(--muted);
+  text-align: right;
+}
+
+.emo-multi-badge {
+  justify-self: end;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.emo-multi-badge.ok {
+  background: rgba(162, 245, 191, 0.18);
+  color: var(--green);
+}
+
+.emo-multi-badge.warn {
+  background: rgba(255, 189, 102, 0.18);
+  color: var(--amber);
+}
+
+.emo-timeline-wrap {
+  margin-top: 16px;
+}
+
+.emo-timeline-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.emo-timeline-legend .dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: -1px;
+}
+
+.emo-timeline-legend .dot.val { background: var(--green); }
+.emo-timeline-legend .dot.aro { background: var(--rose); }
+
+.emo-voice-toggle {
+  margin-left: auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--panel-strong);
+}
+
+.emo-voice-toggle.ghost {
+  color: var(--muted);
+  background: transparent;
+}
+
+.emo-timeline {
+  width: 100%;
+  height: 60px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.emo-status {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .emotion-grid { grid-template-columns: 1fr; }
+  .emo-modalities { grid-template-columns: 1fr; }
+}
+
+/* ===== 情绪驱动的全局动效（让中央机器人与情绪联动，最抓眼球） ===== */
+:root {
+  --emo-color: #bfb4aa;
+  --emo-glow: 0;
+  --emo-pulse: 4s;
+}
+
+.emo-aura {
+  position: absolute;
+  inset: 6%;
+  border-radius: 50%;
+  background: radial-gradient(circle at center, var(--emo-color) 0%, transparent 60%);
+  opacity: var(--emo-glow);
+  filter: blur(30px);
+  transition: opacity 0.9s ease, background 0.9s ease;
+  animation: emoAuraPulse var(--emo-pulse) ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+@keyframes emoAuraPulse {
+  0%, 100% { transform: scale(0.94); }
+  50% { transform: scale(1.14); }
+}
+
+.robot-stage .ambient-ring,
+.robot-stage .robot,
+.robot-stage .robot-status {
+  position: relative;
+  z-index: 1;
+}
+
+/* 融合环呼吸光，脉冲速度随唤醒度变化 */
+.emo-ring {
+  animation: emoRingBreathe var(--emo-pulse) ease-in-out infinite;
+}
+
+@keyframes emoRingBreathe {
+  0%, 100% { filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.14)); }
+  50% { filter: drop-shadow(0 0 13px var(--emo-color)); }
+}
+
+/* valence-arousal 光点 halo 脉冲 */
+.emo-va-plot #emoVAHalo {
+  filter: blur(3px);
+  transition: cx 0.9s ease, cy 0.9s ease, fill 0.6s ease, opacity 0.6s ease;
+  animation: emoHaloPulse var(--emo-pulse) ease-in-out infinite;
+}
+
+@keyframes emoHaloPulse {
+  0%, 100% { r: 12; }
+  50% { r: 19; }
+}
+
+/* 置信度条流光 */
+.emo-bar i {
+  position: relative;
+  overflow: hidden;
+}
+
+.emo-bar i::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  transform: translateX(-100%);
+  animation: emoShimmer 2.4s ease-in-out infinite;
+}
+
+@keyframes emoShimmer {
+  0% { transform: translateX(-100%); }
+  60%, 100% { transform: translateX(240%); }
+}
+
+/* ===== 视频按真实 16:9 显示：不再被拉伸成方形把人脸放大裁掉 ===== */
+.perception-card .video-wrap {
+  aspect-ratio: 16 / 9 !important;
+  flex: none !important;
+  width: 100% !important;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: calc(100vh - 220px);
+}
+
+.perception-card #video,
+.perception-card #faceOverlay {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  object-fit: cover;
 }

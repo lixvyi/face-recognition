@@ -7,7 +7,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Serif+SC:wght@600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=investor-stage-1" />
+    <link rel="stylesheet" href="./styles.css?v=task234-pyannote-multiface-ssd-1" />
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.14.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
   </head>
   <body>
     <main class="shell">
@@ -23,6 +25,7 @@
           </div>
         </div>
         <div class="robot-stage" aria-label="robot presence visualization">
+          <div id="emoAura" class="emo-aura" aria-hidden="true"></div>
           <div class="ambient-ring"></div>
           <div id="robot" class="robot attentive">
             <div class="antenna"></div>
@@ -55,6 +58,7 @@
             <div id="privacyBadge" class="privacy-badge muted">camera/mic off</div>
             <div id="cameraDebug" class="camera-debug">点击“启动感知 demo”后请求摄像头权限</div>
             <div id="faceHud" class="face-hud">Face model: idle</div>
+            <div id="objectHud" class="object-hud">SSD: idle</div>
           </div>
           <div class="signal-grid">
             <div>
@@ -108,6 +112,22 @@
               <strong id="mouthText">未检测</strong>
             </div>
           </div>
+          <div class="debug-toggles">
+            <label><input type="checkbox" id="ssdOverlayToggle" checked /> SSD 检测框（绿虚线）</label>
+            <label><input type="checkbox" id="ifOverlayToggle" checked /> InsightFace 全帧框（紫虚线）</label>
+          </div>
+        </article>
+
+        <article class="panel diarization-card">
+          <div class="section-title">
+            <span>12</span>
+            <div>
+              <h2>多人音轨分离</h2>
+              <p>pyannote 3.1 说话人 diarization；需 PYANNOTE_HF_TOKEN（见 .env.example 统一安装）。</p>
+            </div>
+          </div>
+          <p id="diarizationStatus" class="dia-status">等待麦克风…</p>
+          <div id="diarizationSegments" class="dia-segments"></div>
         </article>
 
         <article class="panel blendshape-card">
@@ -138,7 +158,7 @@
             <span>10</span>
             <div>
               <h2>实例级关系图谱</h2>
-              <p>把每次 VLM 观察合并成稳定的物体实例（带图像证据）、人-物关系（弱/中/强/已确认）和交互事件链，并可由用户纠正。</p>
+              <p>把 VLM 观察合并成稳定物体实例；COCO-SSD 交叉校验 bbox，仅 confirmed 才保存缩略图证据。</p>
             </div>
           </div>
           <div id="sceneMemory" class="scene-memory"></div>
@@ -156,6 +176,82 @@
             <div id="stateCore" class="state-core">observing</div>
           </div>
           <div class="state-list" id="stateList"></div>
+        </article>
+
+        <article class="panel emotion-card">
+          <div class="section-title">
+            <span>11</span>
+            <div>
+              <h2>多模态情绪信号</h2>
+              <p>面部 ViT-FER + 语音 WavLM SER，经 MDAT 融合成 valence-arousal 线索；多人脸各自 FER 后聚合。<strong class="emo-disclaimer">情绪信号，非心理诊断。</strong></p>
+            </div>
+          </div>
+          <div class="emotion-grid">
+            <div class="emo-fusion">
+              <svg class="emo-ring" viewBox="0 0 140 140" aria-label="fused emotion ring">
+                <circle cx="70" cy="70" r="52" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="8" />
+                <circle id="emoRingArc" cx="70" cy="70" r="52" fill="none" stroke="#bfb4aa" stroke-width="8"
+                  stroke-linecap="round" stroke-dasharray="0 327" transform="rotate(-90 70 70)" />
+                <text id="emoRingEmoji" x="70" y="66" text-anchor="middle" font-size="30">⏳</text>
+                <text id="emoRingLabel" x="70" y="90" text-anchor="middle" font-size="13" fill="#f7efe4" font-weight="700">采集中</text>
+                <text id="emoRingConf" x="70" y="106" text-anchor="middle" font-size="11" fill="#bfb4aa">—</text>
+              </svg>
+              <small class="emo-fusion-cap">融合情绪 · 置信度</small>
+            </div>
+
+            <div class="emo-va">
+              <svg class="emo-va-plot" viewBox="0 0 200 200" aria-label="valence arousal plane">
+                <rect x="6" y="6" width="188" height="188" rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.12)" />
+                <line x1="100" y1="10" x2="100" y2="190" stroke="rgba(255,255,255,0.14)" stroke-dasharray="3 4" />
+                <line x1="10" y1="100" x2="190" y2="100" stroke="rgba(255,255,255,0.14)" stroke-dasharray="3 4" />
+                <text x="186" y="96" text-anchor="end" font-size="9" fill="#bfb4aa">valence +</text>
+                <text x="14" y="96" font-size="9" fill="#bfb4aa">−</text>
+                <text x="104" y="20" font-size="9" fill="#bfb4aa">arousal +</text>
+                <text x="104" y="190" font-size="9" fill="#bfb4aa">−</text>
+                <text x="150" y="40" text-anchor="middle" font-size="9" fill="#ffbd66">兴奋/紧张</text>
+                <text x="50" y="40" text-anchor="middle" font-size="9" fill="#ff7a90">愤怒/焦虑</text>
+                <text x="50" y="172" text-anchor="middle" font-size="9" fill="#7bdff2">低落/疲惫</text>
+                <text x="150" y="172" text-anchor="middle" font-size="9" fill="#a2f5bf">放松/愉悦</text>
+                <polyline id="emoVATrail" points="" fill="none" stroke="rgba(182,156,255,0.55)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+                <circle id="emoVAHalo" cx="100" cy="100" r="14" fill="#bfb4aa" opacity="0" />
+                <circle id="emoVADot" cx="100" cy="100" r="6" fill="#bfb4aa" opacity="0.3" />
+              </svg>
+              <small class="emo-fusion-cap">valence-arousal 实时轨迹</small>
+            </div>
+          </div>
+
+          <div class="emo-modalities">
+            <div id="emoFaceRow" class="emo-modality"></div>
+            <div id="emoMultiFaceList" class="emo-multi-face-list"></div>
+            <div id="emoVoiceRow" class="emo-modality"></div>
+          </div>
+
+          <div class="emo-timeline-wrap">
+            <div class="emo-timeline-legend">
+              <span><i class="dot val"></i>valence</span>
+              <span><i class="dot aro"></i>arousal</span>
+              <button id="voiceEmotionToggle" type="button" class="emo-voice-toggle">语音情绪采样：开</button>
+            </div>
+            <svg class="emo-timeline" viewBox="0 0 240 60" preserveAspectRatio="none" aria-label="emotion timeline">
+              <defs>
+                <linearGradient id="emoGradVal" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#a2f5bf" stop-opacity="0.45" />
+                  <stop offset="100%" stop-color="#a2f5bf" stop-opacity="0" />
+                </linearGradient>
+                <linearGradient id="emoGradAro" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#ff7a90" stop-opacity="0.4" />
+                  <stop offset="100%" stop-color="#ff7a90" stop-opacity="0" />
+                </linearGradient>
+              </defs>
+              <line x1="0" y1="30" x2="240" y2="30" stroke="rgba(255,255,255,0.12)" stroke-dasharray="2 4" />
+              <polygon id="emoTLValenceArea" points="" fill="url(#emoGradVal)" />
+              <polygon id="emoTLArousalArea" points="" fill="url(#emoGradAro)" />
+              <polyline id="emoTLValence" points="" fill="none" stroke="#a2f5bf" stroke-width="1.8" />
+              <polyline id="emoTLArousal" points="" fill="none" stroke="#ff7a90" stroke-width="1.8" />
+            </svg>
+          </div>
+
+          <p id="emotionStatus" class="emo-status">等待摄像头与情绪模型启动</p>
         </article>
 
         <article class="panel memory-card">
@@ -228,7 +324,7 @@
           <span>07</span>
           <div>
             <h2>本地人脸关系档案</h2>
-            <p>MediaPipe bbox 裁剪后走 InsightFace 注册/匹配；provider 与 top-3 候选人始终可见，fallback 不会伪装成真实识别。</p>
+            <p>MediaPipe 最多 4 张脸 + IoU 轨迹；InsightFace 全帧补检与批量匹配；每人独立 ViT-FER。</p>
           </div>
         </div>
         <div class="identity-grid">
@@ -266,6 +362,6 @@
       </section>
     </main>
 
-    <script src="./app.js?v=relationship-graph-4"></script>
+    <script src="./app.js?v=gesture-scissors-3"></script>
   </body>
 </html>

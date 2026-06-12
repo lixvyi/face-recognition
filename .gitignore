@@ -34,6 +34,9 @@ vendor/mediapipe/**/wasm/
 *.onnx
 *.bin
 
+# Local temp / test artifacts
+.tmp-*
+
 # OS / editor
 .idea/
 .vscode/

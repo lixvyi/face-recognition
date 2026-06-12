@@ -6,6 +6,7 @@ const elements = {
   canvas: document.querySelector('#analysisCanvas'),
   faceOverlay: document.querySelector('#faceOverlay'),
   faceHud: document.querySelector('#faceHud'),
+  objectHud: document.querySelector('#objectHud'),
   privacyBadge: document.querySelector('#privacyBadge'),
   cameraDebug: document.querySelector('#cameraDebug'),
   robot: document.querySelector('#robot'),
@@ -58,7 +59,73 @@ const elements = {
   sceneMemory: document.querySelector('#sceneMemory'),
   serverStatus: document.querySelector('#serverStatus'),
   clearPeopleButton: document.querySelector('#clearPeopleButton'),
+  emotionStatus: document.querySelector('#emotionStatus'),
+  emoRingArc: document.querySelector('#emoRingArc'),
+  emoRingLabel: document.querySelector('#emoRingLabel'),
+  emoRingEmoji: document.querySelector('#emoRingEmoji'),
+  emoRingConf: document.querySelector('#emoRingConf'),
+  emoVADot: document.querySelector('#emoVADot'),
+  emoVAHalo: document.querySelector('#emoVAHalo'),
+  emoVATrail: document.querySelector('#emoVATrail'),
+  emoTLValence: document.querySelector('#emoTLValence'),
+  emoTLArousal: document.querySelector('#emoTLArousal'),
+  emoTLValenceArea: document.querySelector('#emoTLValenceArea'),
+  emoTLArousalArea: document.querySelector('#emoTLArousalArea'),
+  emoAura: document.querySelector('#emoAura'),
+  emoFaceRow: document.querySelector('#emoFaceRow'),
+  emoMultiFaceList: document.querySelector('#emoMultiFaceList'),
+  emoVoiceRow: document.querySelector('#emoVoiceRow'),
+  voiceEmotionToggle: document.querySelector('#voiceEmotionToggle'),
+  ssdOverlayToggle: document.querySelector('#ssdOverlayToggle'),
+  ifOverlayToggle: document.querySelector('#ifOverlayToggle'),
+  diarizationStatus: document.querySelector('#diarizationStatus'),
+  diarizationSegments: document.querySelector('#diarizationSegments'),
 };
+
+const APP_CACHE_VERSION = 'gesture-scissors-3';
+const MAX_FACES = 4;
+// MediaPipe Pose 33 关键点骨架连线（BlazePose topology）
+const POSE_CONNECTIONS = [
+  [0, 1], [1, 2], [2, 3], [3, 7], [0, 4], [4, 5], [5, 6], [6, 8],
+  [9, 10], [11, 12], [11, 13], [13, 15], [15, 17], [15, 19], [15, 21], [17, 19],
+  [12, 14], [14, 16], [16, 18], [16, 20], [16, 22], [18, 20],
+  [11, 23], [12, 24], [23, 24], [23, 25], [24, 26], [25, 27], [26, 28],
+  [27, 29], [28, 30], [29, 31], [30, 32], [27, 31], [28, 32],
+];
+const FACE_COLORS = ['#7bdff2', '#ffbd66', '#a2f5bf', '#c792ff'];
+// COCO-SSD 类别 → VLM 开放词汇别名（用于 bbox 交叉验证）
+const COCO_VLM_ALIASES = {
+  cup: ['cup', 'mug', 'glass', '马克杯', '杯子'],
+  bottle: ['bottle', 'water bottle', '瓶子'],
+  'cell phone': ['phone', 'cell phone', 'mobile', '手机'],
+  laptop: ['laptop', 'computer', 'notebook', '电脑', '笔记本'],
+  book: ['book', '书'],
+  keyboard: ['keyboard', '键盘'],
+  mouse: ['mouse', '鼠标'],
+  chair: ['chair', '椅子'],
+  tv: ['tv', 'television', 'monitor', '屏幕'],
+  remote: ['remote', 'remote control', '遥控器'],
+  scissors: ['scissors', 'comb', 'hair comb', 'brush', '梳子'],
+  toothbrush: ['toothbrush', '牙刷'],
+  handbag: ['bag', 'handbag', 'backpack', '包'],
+  clock: ['clock', 'watch', '钟', '表'],
+  vase: ['vase', '花瓶'],
+  bowl: ['bowl', '碗'],
+  sandwich: ['sandwich', 'food'],
+  orange: ['orange', 'fruit'],
+  banana: ['banana', 'fruit'],
+  person: ['person', '人'],
+};
+const storedCacheVersion = localStorage.getItem('hri-demo-cache-version');
+if (storedCacheVersion !== APP_CACHE_VERSION) {
+  [
+    'hri-demo-scene',
+    'hri-demo-scene-memory',
+    'hri-demo-baseline',
+    'hri-demo-open-vocab-detector',
+  ].forEach(key => localStorage.removeItem(key));
+  localStorage.setItem('hri-demo-cache-version', APP_CACHE_VERSION);
+}
 
 const state = {
   started: false,
@@ -80,6 +147,19 @@ const state = {
   faceLandmarker: null,
   faceModelReady: false,
   faceModelError: '',
+  poseLandmarker: null,
+  poseModelReady: false,
+  poseModelError: '',
+  poseLandmarks: null,
+  trackedFaces: [],
+  primaryFaceId: '',
+  faceTracks: [],
+  faceTrackPool: [],
+  vlmCropStats: { accepted: 0, rejected: 0, lastAt: 0 },
+  handLandmarker: null,
+  handModelReady: false,
+  handLandmarks: [],
+  gestures: [],
   lastFaceAt: 0,
   faceDescriptor: null,
   faceBlendshapes: [],
@@ -101,6 +181,7 @@ const state = {
   activePersonScore: 0,
   explicitPersonId: '',
   faceMatch: { personId: '', score: 0, provider: '', candidates: [] },
+  multiFaceMatches: {},
   voiceMatch: { personId: '', score: 0 },
   voiceDescriptor: null,
   audioStream: null,
@@ -115,13 +196,49 @@ const state = {
   pendingOwnership: null,
   sceneBusy: false,
   sceneFrames: [],
+  sceneFramesForThumbnail: [],
   lastSceneAt: 0,
+  ssd: { model: null, ready: false, loading: false, detections: [], lastAt: 0 },
   readiness: 35,
   arousal: 20,
   energy: 45,
   quietNeed: 20,
   interactionState: 'observing',
   confidence: 0.35,
+  // 多模态情绪信号（非心理诊断）：面部 FER + 语音 SER + 加权融合。
+  emotion: {
+    faceReady: false,
+    voiceReady: false,
+    voiceSampling: JSON.parse(localStorage.getItem('hri-demo-voice-emotion') || 'true'),
+    face: { emotion: '', scores: {}, valence: 0, arousal: 0, confidence: 0, provider: '', model: '', at: 0, error: '' },
+    voice: { emotion: '', scores: {}, valence: 0, arousal: 0, confidence: 0, provider: '', model: '', at: 0, error: '' },
+    fused: { emotion: 'neutral', scores: {}, valence: 0, arousal: 0, confidence: 0 },
+    history: [],
+    policyNote: '',
+    faceInFlight: false,
+    voiceInFlight: false,
+    lastFaceAt: 0,
+    lastVoiceAt: 0,
+    faces: {},
+    faceEmotionIndex: 0,
+    fusionNote: '',
+  },
+  diarization: {
+    provider: 'pyannote_3.1',
+    segments: [],
+    active: false,
+    speakerEstimate: 0,
+    lastAt: 0,
+    busy: false,
+    ready: false,
+  },
+  debug: {
+    ssdOverlay: JSON.parse(localStorage.getItem('hri-demo-ssd-overlay') ?? 'true'),
+    insightfaceOverlay: JSON.parse(localStorage.getItem('hri-demo-if-overlay') ?? 'true'),
+  },
+  insightfaceDetections: [],
+  lastInsightfaceDetectAt: 0,
+  insightfaceDetectInFlight: false,
   intervention: 'observe',
   lastInterventionAt: 0,
   memories: JSON.parse(localStorage.getItem('hri-demo-memories') || '[]'),
@@ -183,6 +300,8 @@ function migrateGraph() {
   mem.objects.forEach(object => {
     if (typeof object.visualDescription !== 'string') object.visualDescription = '';
     if (!('bboxNorm' in object)) object.bboxNorm = null;
+    if (!object.bboxQuality) object.bboxQuality = assessObjectBboxQuality(object.bboxNorm);
+    if (!object.thumbnailMeta) object.thumbnailMeta = null;
     if (!('thumbnail' in object)) object.thumbnail = '';
     if (!object.status) object.status = 'present';
     if (typeof object.seenCount !== 'number') object.seenCount = 1;
@@ -251,12 +370,404 @@ function matchSceneObjectInstance(input) {
   return bestScore >= 0.55 ? best : null;
 }
 
-// 从当前视频帧按归一化 bbox 裁剪一张缩略图作为图像证据。
+// —— VLM 物体 bbox 裁剪：格式归一化 + 多帧候选 + 质量评分 ——
+function clamp01(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return Math.min(1, Math.max(0, num));
+}
+
+function normalizeObjectBboxNorm(bbox) {
+  if (!bbox) return null;
+  const arr = Array.isArray(bbox) ? bbox.map(Number) : [bbox.x, bbox.y, bbox.w, bbox.h].map(Number);
+  if (arr.length < 4 || arr.some(v => !Number.isFinite(v))) return null;
+  let x = clamp01(arr[0]);
+  let y = clamp01(arr[1]);
+  let w = clamp01(arr[2]);
+  let h = clamp01(arr[3]);
+  // 兼容 [x1,y1,x2,y2]：当 w/h 像右下角坐标时转为 xywh
+  if (arr[2] > arr[0] && arr[3] > arr[1] && (x + w > 1.01 || y + h > 1.01 || w > 0.92 || h > 0.92)) {
+    w = clamp01(arr[2] - arr[0]);
+    h = clamp01(arr[3] - arr[1]);
+  }
+  if (w <= 0.002 || h <= 0.002) return null;
+  w = Math.min(w, 1 - x);
+  h = Math.min(h, 1 - y);
+  return [Number(x.toFixed(4)), Number(y.toFixed(4)), Number(w.toFixed(4)), Number(h.toFixed(4))];
+}
+
+function assessObjectBboxQuality(bboxNorm) {
+  if (!bboxNorm) return { quality: 'missing', score: 0, reason: 'no_bbox' };
+  const [, , w, h] = bboxNorm;
+  const area = w * h;
+  if (area < 0.0008) return { quality: 'poor', score: 0.15, reason: 'bbox_too_small' };
+  if (area > 0.65) return { quality: 'poor', score: 0.2, reason: 'bbox_too_large' };
+  if (w / Math.max(h, 0.001) > 8 || h / Math.max(w, 0.001) > 8) {
+    return { quality: 'uncertain', score: 0.35, reason: 'bbox_extreme_aspect' };
+  }
+  const score = area < 0.004 ? 0.48 : area < 0.35 ? 0.86 : 0.62;
+  return { quality: score >= 0.7 ? 'good' : 'uncertain', score, reason: 'ok' };
+}
+
+function expandObjectBboxNorm(bboxNorm, ratio = 0.12) {
+  const [x, y, w, h] = bboxNorm;
+  const padX = w * ratio;
+  const padY = h * ratio;
+  const nx = Math.max(0, x - padX);
+  const ny = Math.max(0, y - padY);
+  return [
+    Number(nx.toFixed(4)),
+    Number(ny.toFixed(4)),
+    Number(Math.min(w + padX * 2, 1 - nx).toFixed(4)),
+    Number(Math.min(h + padY * 2, 1 - ny).toFixed(4)),
+  ];
+}
+
+function bboxIoU(a, b) {
+  if (!a || !b || a.length < 4 || b.length < 4) return 0;
+  const ax2 = a[0] + a[2];
+  const ay2 = a[1] + a[3];
+  const bx2 = b[0] + b[2];
+  const by2 = b[1] + b[3];
+  const ix = Math.max(0, Math.min(ax2, bx2) - Math.max(a[0], b[0]));
+  const iy = Math.max(0, Math.min(ay2, by2) - Math.max(a[1], b[1]));
+  const inter = ix * iy;
+  const union = a[2] * a[3] + b[2] * b[3] - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+function blendBboxes(a, b, alpha = 0.5) {
+  return [
+    Number((a[0] * (1 - alpha) + b[0] * alpha).toFixed(4)),
+    Number((a[1] * (1 - alpha) + b[1] * alpha).toFixed(4)),
+    Number((a[2] * (1 - alpha) + b[2] * alpha).toFixed(4)),
+    Number((a[3] * (1 - alpha) + b[3] * alpha).toFixed(4)),
+  ];
+}
+
+function labelsMatchVlmAndSsd(vlmLabel, ssdClass) {
+  const norm = normalizeLabel(vlmLabel);
+  const ssdNorm = normalizeLabel(ssdClass);
+  if (norm === ssdNorm || norm.includes(ssdNorm) || ssdNorm.includes(norm)) return true;
+  const aliases = COCO_VLM_ALIASES[ssdClass] || [];
+  return aliases.some(alias => {
+    const a = normalizeLabel(alias);
+    return norm.includes(a) || a.includes(norm);
+  });
+}
+
+function vlmLabelHasCocoAlias(label) {
+  const norm = String(label || '').trim().toLowerCase();
+  if (!norm) return false;
+  return Object.values(COCO_VLM_ALIASES).some(aliases =>
+    aliases.some(alias => norm.includes(alias) || alias.includes(norm))
+  );
+}
+
+function refineBboxWithSsd(bboxNorm, label, ssdDetections) {
+  if (!bboxNorm || !ssdDetections?.length) {
+    return { bboxNorm, validation: 'unmatched', ssdMatch: null };
+  }
+  let best = null;
+  ssdDetections.forEach(det => {
+    if (!labelsMatchVlmAndSsd(label, det.class)) return;
+    const iou = bboxIoU(bboxNorm, det.bboxNorm);
+    if (!best || iou > best.iou) best = { ...det, iou };
+  });
+  if (!best || best.iou < 0.1) {
+    return { bboxNorm, validation: 'unmatched', ssdMatch: best };
+  }
+  const refined = best.iou >= 0.25 ? best.bboxNorm : blendBboxes(bboxNorm, best.bboxNorm, 0.45);
+  return {
+    bboxNorm: normalizeObjectBboxNorm(refined) || bboxNorm,
+    validation: best.iou >= 0.25 ? 'confirmed' : 'uncertain',
+    ssdMatch: { class: best.class, score: Number(best.score.toFixed(3)), iou: Number(best.iou.toFixed(3)) },
+  };
+}
+
+async function detectObjectsOnImage(img) {
+  if (!state.ssd?.model || !img?.width) return [];
+  try {
+    const predictions = await state.ssd.model.detect(img);
+    return predictions
+      .filter(item => item.score >= 0.32)
+      .map(item => ({
+        class: item.class,
+        score: item.score,
+        bboxNorm: normalizeObjectBboxNorm([
+          item.bbox[0] / img.width,
+          item.bbox[1] / img.height,
+          item.bbox[2] / img.width,
+          item.bbox[3] / img.height,
+        ]),
+      }))
+      .filter(item => item.bboxNorm);
+  } catch {
+    return [];
+  }
+}
+
+function bboxNormToArray(bbox) {
+  if (!bbox) return null;
+  if (Array.isArray(bbox)) return normalizeObjectBboxNorm(bbox);
+  if (bbox.w != null) return normalizeObjectBboxNorm([bbox.x, bbox.y, bbox.w, bbox.h]);
+  return null;
+}
+
+function bboxNormFromArray(arr) {
+  if (!arr) return null;
+  return { x: arr[0], y: arr[1], w: arr[2], h: arr[3] };
+}
+
+function assessFaceCropQualityFromBbox(bboxNorm) {
+  const arr = bboxNormToArray(bboxNorm);
+  if (!arr) return { quality: 'no_face', reason: 'no_bbox' };
+  const area = arr[2] * arr[3];
+  if (area < 0.0064) return { quality: 'poor', reason: 'face_too_small' };
+  if (area > 0.4225) return { quality: 'poor', reason: 'face_too_large' };
+  return { quality: area < 0.02 ? 'ok' : 'good', reason: 'insightface_bbox' };
+}
+
+function mergeInsightFaceIntoTracks(trackedFaces, ifDetections) {
+  if (!ifDetections?.length) {
+    return trackedFaces.map(face => ({ ...face, source: face.source || 'mediapipe' }));
+  }
+  const merged = trackedFaces.map(face => ({ ...face, source: 'mediapipe' }));
+  const usedIf = new Set();
+  merged.forEach(face => {
+    const arr = bboxNormToArray(face.bboxNorm);
+    if (!arr) return;
+    let bestIou = 0;
+    let bestIdx = -1;
+    ifDetections.forEach((det, idx) => {
+      const iou = bboxIoU(arr, bboxNormToArray(det.bboxNorm));
+      if (iou > bestIou) {
+        bestIou = iou;
+        bestIdx = idx;
+      }
+    });
+    if (bestIdx >= 0 && bestIou >= 0.18) {
+      usedIf.add(bestIdx);
+      face.source = 'fused';
+      face.ifDetScore = ifDetections[bestIdx].detScore;
+      if (bestIou >= 0.32) {
+        face.bboxNorm = bboxNormFromArray(bboxNormToArray(ifDetections[bestIdx].bboxNorm));
+        const q = assessFaceCropQualityFromBbox(face.bboxNorm);
+        face.cropQuality = q.quality;
+        face.cropReason = q.reason;
+      }
+    }
+  });
+  ifDetections.forEach((det, idx) => {
+    if (usedIf.has(idx)) return;
+    const arr = bboxNormToArray(det.bboxNorm);
+    if (!arr) return;
+    const q = assessFaceCropQualityFromBbox(arr);
+    merged.push({
+      id: `if_sup_${idx}`,
+      index: merged.length,
+      landmarks: null,
+      blendshapes: [],
+      bboxNorm: bboxNormFromArray(arr),
+      cropQuality: q.quality,
+      cropReason: q.reason,
+      source: 'insightface',
+      ifDetScore: det.detScore,
+    });
+  });
+  return merged.slice(0, MAX_FACES);
+}
+
+function faceBoxPixels(face, canvas) {
+  if (face.landmarks?.length) {
+    return {
+      left: Math.min(...face.landmarks.map(point => point.x)) * canvas.width,
+      right: Math.max(...face.landmarks.map(point => point.x)) * canvas.width,
+      top: Math.min(...face.landmarks.map(point => point.y)) * canvas.height,
+      bottom: Math.max(...face.landmarks.map(point => point.y)) * canvas.height,
+    };
+  }
+  const arr = bboxNormToArray(face.bboxNorm);
+  if (!arr) return null;
+  return {
+    left: arr[0] * canvas.width,
+    top: arr[1] * canvas.height,
+    right: (arr[0] + arr[2]) * canvas.width,
+    bottom: (arr[1] + arr[3]) * canvas.height,
+  };
+}
+
+async function loadCocoSsd() {
+  if (state.ssd?.ready || state.ssd?.loading) return;
+  state.ssd = { ...state.ssd, loading: true };
+  try {
+    if (typeof cocoSsd === 'undefined') throw new Error('coco-ssd script not loaded');
+    const model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+    state.ssd = { model, ready: true, loading: false, detections: [], lastAt: 0 };
+    addEvent('SSD ready', 'COCO-SSD 已加载，用于校验/修正 VLM 物体 bbox。');
+  } catch (error) {
+    state.ssd = { model: null, ready: false, loading: false, error: error.message, detections: [], lastAt: 0 };
+    addEvent('SSD 未加载', error.message);
+  }
+}
+
+async function sampleSsdOnVideo() {
+  if (!state.ssd?.ready || !state.started || elements.video.readyState < 2) return;
+  if (Date.now() - (state.ssd.lastAt || 0) < 2500) return;
+  try {
+    const predictions = await state.ssd.model.detect(elements.video);
+    const vw = elements.video.videoWidth || 1;
+    const vh = elements.video.videoHeight || 1;
+    state.ssd.detections = predictions
+      .filter(item => item.score >= 0.4)
+      .slice(0, 12)
+      .map(item => ({
+        class: item.class,
+        score: item.score,
+        bboxNorm: normalizeObjectBboxNorm([
+          item.bbox[0] / vw,
+          item.bbox[1] / vh,
+          item.bbox[2] / vw,
+          item.bbox[3] / vh,
+        ]),
+      }))
+      .filter(item => item.bboxNorm);
+    state.ssd.lastAt = Date.now();
+  } catch {
+    // non-blocking
+  }
+}
+
+function scoreCropCanvas(canvas) {
+  const ctx = canvas.getContext('2d');
+  const { width, height } = canvas;
+  if (width < 4 || height < 4) return 0;
+  const data = ctx.getImageData(0, 0, width, height).data;
+  let sum = 0;
+  let sumSq = 0;
+  for (let i = 0; i < data.length; i += 16) {
+    const v = (data[i] + data[i + 1] + data[i + 2]) / 3;
+    sum += v;
+    sumSq += v * v;
+  }
+  const n = data.length / 16;
+  const mean = sum / n;
+  const variance = Math.max(0, sumSq / n - mean * mean);
+  if (variance < 120) return 0.12;
+  if (mean < 8 || mean > 248) return 0.18;
+  let score = Math.min(1, variance / 1800);
+  if (width * height < 400) score *= 0.72;
+  return Number(score.toFixed(4));
+}
+
+async function pickBestObjectThumbnail(object, frames) {
+  const baseBbox = normalizeObjectBboxNorm(object.bboxNorm);
+  if (!baseBbox || !frames?.length) {
+    return {
+      thumbnail: '',
+      bboxNorm: baseBbox,
+      frameIndex: object.frameIndex || 3,
+      meta: null,
+      bboxQuality: assessObjectBboxQuality(baseBbox),
+    };
+  }
+  const preferredIndex = Math.min(frames.length, Math.max(1, object.frameIndex || 3)) - 1;
+  const indices = [...new Set([preferredIndex, 0, 1, 2].filter(i => i >= 0 && i < frames.length))];
+  const variants = [
+    { bbox: baseBbox, label: 'raw' },
+    { bbox: expandObjectBboxNorm(baseBbox, 0.1), label: 'pad10' },
+    { bbox: expandObjectBboxNorm(baseBbox, 0.18), label: 'pad18' },
+  ];
+  let best = {
+    score: 0,
+    thumbnail: '',
+    bboxNorm: baseBbox,
+    frameIndex: preferredIndex + 1,
+    meta: null,
+  };
+  for (const frameIdx of indices) {
+    const frame = frames[frameIdx];
+    if (!frame?.image) continue;
+    let img;
+    try {
+      img = await loadImageElement(frame.image);
+    } catch {
+      continue;
+    }
+    for (const variant of variants) {
+      const quality = assessObjectBboxQuality(variant.bbox);
+      if (quality.score < 0.12) continue;
+      const ssdDetections = await detectObjectsOnImage(img);
+      const refined = refineBboxWithSsd(variant.bbox, object.label, ssdDetections);
+      if (state.ssd?.ready && vlmLabelHasCocoAlias(object.label) && refined.validation !== 'confirmed') {
+        continue;
+      }
+      const bbox = refined.bboxNorm;
+      const thumb = cropImage(img, bbox, 120);
+      if (!thumb) continue;
+      let cropScore = 0.38;
+      try {
+        const tempImg = await loadImageElement(thumb);
+        const canvas = document.createElement('canvas');
+        canvas.width = tempImg.width;
+        canvas.height = tempImg.height;
+        canvas.getContext('2d').drawImage(tempImg, 0, 0);
+        cropScore = scoreCropCanvas(canvas);
+      } catch {
+        cropScore = 0.35;
+      }
+      const frameBonus = frameIdx === preferredIndex ? 0.08 : 0;
+      const ssdBonus = refined.validation === 'confirmed' ? 0.12 : refined.validation === 'uncertain' ? 0.04 : 0;
+      const total = cropScore * 0.62 + quality.score * 0.24 + frameBonus + ssdBonus;
+      if (total > best.score) {
+        best = {
+          score: total,
+          thumbnail: thumb,
+          bboxNorm: bbox,
+          frameIndex: frameIdx + 1,
+          meta: {
+            score: Number(total.toFixed(4)),
+            cropScore,
+            bboxQuality: quality,
+            variant: variant.label,
+            frameIndex: frameIdx + 1,
+            ssd: refined.ssdMatch,
+            validation: refined.validation,
+          },
+        };
+      }
+    }
+  }
+  return {
+    thumbnail: best.thumbnail,
+    bboxNorm: best.bboxNorm,
+    frameIndex: best.frameIndex,
+    meta: best.meta,
+    bboxQuality: best.meta?.bboxQuality || assessObjectBboxQuality(baseBbox),
+  };
+}
+
+// 从发送给 VLM 的帧按归一化 bbox 裁剪缩略图（同步降级路径）。
 function captureRegionThumbnail(bboxNorm, maxEdge = 96) {
   if (!bboxNorm || !state.started) return '';
+  const normalized = normalizeObjectBboxNorm(bboxNorm);
+  if (!normalized) return '';
+  const frames = state.sceneFramesForThumbnail || [];
+  if (frames.length > 0) {
+    const lastFrame = frames[frames.length - 1];
+    if (lastFrame?.image) {
+      return captureFromImageDataUrlSync(lastFrame.image, normalized, maxEdge);
+    }
+  }
   const vw = elements.video.videoWidth;
   const vh = elements.video.videoHeight;
   if (!vw || !vh) return '';
+  return cropImageFromVideo(normalized, maxEdge);
+}
+
+function cropImageFromVideo(bboxNorm, maxEdge = 96) {
+  const vw = elements.video.videoWidth;
+  const vh = elements.video.videoHeight;
   const sx = Math.round(bboxNorm[0] * vw);
   const sy = Math.round(bboxNorm[1] * vh);
   const sw = Math.max(8, Math.round(bboxNorm[2] * vw));
@@ -271,6 +782,106 @@ function captureRegionThumbnail(bboxNorm, maxEdge = 96) {
   } catch {
     return '';
   }
+}
+
+// 同步从 data URL 图像中裁剪指定区域（使用 OffscreenCanvas 或同步解析）
+function captureFromImageDataUrlSync(imageDataUrl, bboxNorm, maxEdge = 96) {
+  try {
+    // 解码 base64 图像数据
+    const match = imageDataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+    if (!match) return '';
+    
+    const mimeType = match[1];
+    const base64Data = match[2];
+    const binaryData = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+    
+    // 创建 image blob 并同步处理
+    const blob = new Blob([binaryData], { type: `image/${mimeType}` });
+    const url = URL.createObjectURL(blob);
+    
+    // 使用同步方式加载图片（通过创建一个隐藏的 img 元素）
+    const img = document.createElement('img');
+    img.src = url;
+    
+    // 尝试同步等待图片加载（对于已缓存的数据 URL 应该很快）
+    if (img.complete) {
+      URL.revokeObjectURL(url);
+      return cropImage(img, bboxNorm, maxEdge);
+    }
+    
+    // 如果图片还没加载完成，返回空（稍后会在异步回调中补全）
+    URL.revokeObjectURL(url);
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+// 从 img 元素裁剪指定区域（bbox 为 [x,y,w,h] 归一化坐标）
+function cropImage(img, bboxNorm, maxEdge = 96) {
+  const normalized = normalizeObjectBboxNorm(bboxNorm);
+  if (!normalized) return '';
+  const sx = Math.round(normalized[0] * img.width);
+  const sy = Math.round(normalized[1] * img.height);
+  const sw = Math.max(8, Math.round(normalized[2] * img.width));
+  const sh = Math.max(8, Math.round(normalized[3] * img.height));
+  const scale = Math.min(1, maxEdge / Math.max(sw, sh));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(sw * scale);
+  canvas.height = Math.round(sh * scale);
+  canvas.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.5);
+}
+
+function loadImageElement(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+}
+
+async function captureRegionThumbnailFromFrame(imageDataUrl, bboxNorm, maxEdge = 120) {
+  if (!imageDataUrl || !bboxNorm) return '';
+  try {
+    const img = await loadImageElement(imageDataUrl);
+    return cropImage(img, bboxNorm, maxEdge);
+  } catch {
+    return '';
+  }
+}
+
+async function attachSceneObjectThumbnails(objects, frames) {
+  let accepted = 0;
+  let rejected = 0;
+  const result = await Promise.all(objects.map(async object => {
+    const normalizedBbox = normalizeObjectBboxNorm(object.bboxNorm);
+    const prepared = { ...object, bboxNorm: normalizedBbox };
+    const picked = await pickBestObjectThumbnail(prepared, frames);
+    const cocoGated = state.ssd?.ready && vlmLabelHasCocoAlias(prepared.label);
+    const minScore = cocoGated ? 0.28 : 0.22;
+    const ok = (picked.meta?.score || 0) >= minScore
+      && (!cocoGated || picked.meta?.validation === 'confirmed');
+    if (ok) accepted += 1;
+    else rejected += 1;
+    return {
+      ...prepared,
+      bboxNorm: picked.bboxNorm || normalizedBbox,
+      frameIndex: picked.frameIndex || prepared.frameIndex || 3,
+      thumbnail: ok ? picked.thumbnail : '',
+      thumbnailMeta: picked.meta,
+      bboxQuality: picked.bboxQuality || assessObjectBboxQuality(normalizedBbox),
+    };
+  }));
+  if (accepted || rejected) {
+    state.vlmCropStats = {
+      accepted: (state.vlmCropStats?.accepted || 0) + accepted,
+      rejected: (state.vlmCropStats?.rejected || 0) + rejected,
+      lastAt: Date.now(),
+    };
+  }
+  return result;
 }
 
 function newSampleId() {
@@ -408,7 +1019,19 @@ async function pingServer() {
     state.insightfaceReady = Boolean(data.insightfaceReady);
     state.llmConfigured = Boolean(data.llmConfigured);
     state.identityPython = data.python || '';
+    state.emotion.faceReady = Boolean(data.faceEmotionReady);
+    state.emotion.voiceReady = Boolean(data.voiceEmotionReady);
+    state.emotion.faceModel = data.emotionFaceModel || '';
+    state.emotion.voiceModel = data.emotionVoiceModel || '';
+    state.diarization.ready = Boolean(data.diarizationReady);
+    state.diarization.backendDetail = data.diarizationDetail || '';
+    if (data.emotionFusion) state.emotion.fusion = data.emotionFusion;
+    if (data.serProviderLabel) state.emotion.serProviderLabel = data.serProviderLabel;
+    state.yoloFaceReady = Boolean(data.yoloFaceReady);
+    state.faceDetectorMode = data.faceDetectorMode || 'insightface';
+    state.persistentWorkerReady = Boolean(data.persistentWorkerReady);
     renderServerStatus(data);
+    renderDiarization();
     return data;
   } catch (error) {
     state.serverOnline = false;
@@ -435,6 +1058,19 @@ function renderServerStatus(health) {
     parts.push(`InsightFace 就绪 (${health.python || 'python'})`);
   } else {
     parts.push(`InsightFace 未就绪：${health.insightfaceDetail || '见终端'}`);
+  }
+  if (health.diarizationReady) {
+    parts.push('pyannote 3.1 就绪');
+  } else {
+    parts.push(`音轨：${health.diarizationDetail || 'pyannote 未配置'}`);
+  }
+  if (health.yoloFaceReady) {
+    parts.push(`YOLO-face 就绪 (${health.faceDetectorMode || 'both'})`);
+  } else if (health.faceDetectorMode && health.faceDetectorMode !== 'insightface') {
+    parts.push(`人脸检测 ${health.faceDetectorMode}（YOLO 未就绪）`);
+  }
+  if (health.persistentWorkerReady) {
+    parts.push('Python 常驻 worker');
   }
   elements.serverStatus.textContent = `后端已连接 · ${parts.join(' · ')}`;
   elements.serverStatus.className = health.llmConfigured && health.insightfaceReady
@@ -676,10 +1312,16 @@ async function startSensing() {
     setCameraDebug(`摄像头已开启：${videoTrack?.label || 'camera'} · ${settings.width || '?'}x${settings.height || '?'}${audioReady ? ' · mic on' : ' · mic off'}`, 'good');
     elements.robotStatus.textContent = '观察中：默认低打扰';
     addEvent('权限开启', `摄像头${audioReady ? '/麦克风' : ''}只用于本地信号抽取，demo 不上传原始媒体。`);
-    setTimeout(loadFaceLandmarker, 300);
+    setTimeout(() => {
+      loadFaceLandmarker();
+      loadPoseLandmarker();
+      loadHandLandmarker();
+      loadCocoSsd();
+    }, 300);
+    renderObjectHud();
     requestAnimationFrame(analyzeVideo);
     setInterval(updateReasoning, 1200);
-    setInterval(sampleSceneFrame, 3000);
+    setInterval(sampleSceneFrame, 2200);
   } catch (error) {
     const message = explainCameraError(error);
     setCameraDebug(message, 'bad');
@@ -740,6 +1382,7 @@ async function updateSceneUnderstanding() {
   }
   if (Date.now() < state.visionPausedUntil) return;
   state.sceneBusy = true;
+  renderObjectHud();
   const frames = [...state.sceneFrames];
   elements.sceneStatus.textContent = `VLM 正在理解最近 ${frames.length} 帧 / 约 9 秒窗口...`;
   try {
@@ -764,7 +1407,9 @@ async function updateSceneUnderstanding() {
       state.visionPausedUntil = Date.now() + 60000;
     }
     state.lastSceneAt = Date.now();
-    mergeSceneMemory(state.scene);
+    // 保存发送给 VLM 的帧，用于后续裁剪缩略图（避免帧不匹配问题）
+    state.sceneFramesForThumbnail = frames;
+    await mergeSceneMemory(state.scene, frames);
     localStorage.setItem('hri-demo-scene', JSON.stringify(state.scene));
     renderScene();
   } catch (error) {
@@ -779,15 +1424,17 @@ async function updateSceneUnderstanding() {
     elements.sceneStatus.textContent = `场景理解失败：${error.message}。如果 payload 超过数百 KB，已降低分辨率；可继续等待下一轮。`;
   } finally {
     state.sceneBusy = false;
+    renderObjectHud();
   }
 }
 
-function mergeSceneMemory(scene) {
+async function mergeSceneMemory(scene, frames = state.sceneFramesForThumbnail) {
   const person = activePerson();
   const ownerId = person?.id || 'unknown_person';
   const ownerName = person?.name || '未知用户';
   const now = new Date().toISOString();
-  const objects = Array.isArray(scene.objects) ? scene.objects.map(normalizeSceneObjectInput).filter(Boolean) : [];
+  const objectsRaw = Array.isArray(scene.objects) ? scene.objects.map(normalizeSceneObjectInput).filter(Boolean) : [];
+  const objects = await attachSceneObjectThumbnails(objectsRaw, frames);
   const interactions = Array.isArray(scene.interactions) ? scene.interactions.map(normalizeSceneInteractionInput).filter(Boolean) : [];
 
   const byLabel = new Map();
@@ -819,6 +1466,7 @@ function mergeSceneMemory(scene) {
   state.sceneMemory.events = state.sceneMemory.events.slice(-30);
   persistGraph();
   renderSceneMemory();
+  renderObjectHud();
 }
 
 function normalizeLabel(label) {
@@ -837,7 +1485,8 @@ function normalizeSceneObjectInput(value) {
       id: value.id ? String(value.id) : null,
       label,
       visualDescription: String(value.visual_description || value.visualDescription || ''),
-      bboxNorm: Array.isArray(value.bbox_norm) ? value.bbox_norm : (Array.isArray(value.bboxNorm) ? value.bboxNorm : null),
+      bboxNorm: normalizeObjectBboxNorm(value.bbox_norm || value.bboxNorm),
+      frameIndex: Math.min(3, Math.max(1, Number(value.frame_index || value.frameIndex || value.frame || 3) || 3)),
       state: value.state === 'gone' ? 'gone' : 'present',
     };
   }
@@ -866,7 +1515,10 @@ function upsertSceneObject(input, now) {
       normalized: normalizeLabel(input.label),
       visualDescription: input.visualDescription || '',
       bboxNorm: input.bboxNorm || null,
+      frameIndex: input.frameIndex || 3,
       thumbnail: '',
+      thumbnailMeta: input.thumbnailMeta || null,
+      bboxQuality: input.bboxQuality || assessObjectBboxQuality(input.bboxNorm),
       firstSeen: now,
       lastSeen: now,
       seenCount: 0,
@@ -879,8 +1531,20 @@ function upsertSceneObject(input, now) {
   object.seenCount += 1;
   object.status = input.state || 'present';
   if (input.visualDescription) object.visualDescription = input.visualDescription;
-  if (input.bboxNorm) object.bboxNorm = input.bboxNorm;
-  if (!object.thumbnail && object.bboxNorm) {
+  if (input.bboxNorm) object.bboxNorm = normalizeObjectBboxNorm(input.bboxNorm) || input.bboxNorm;
+  if (input.frameIndex) object.frameIndex = input.frameIndex;
+  if (input.bboxQuality) object.bboxQuality = input.bboxQuality;
+  if (input.thumbnail && input.thumbnailMeta) {
+    const prevScore = object.thumbnailMeta?.score || 0;
+    const newScore = input.thumbnailMeta.score || 0;
+    if (!object.thumbnail || newScore >= prevScore) {
+      object.thumbnail = input.thumbnail;
+      object.thumbnailMeta = input.thumbnailMeta;
+    }
+  } else if (input.thumbnail && !object.thumbnail) {
+    object.thumbnail = input.thumbnail;
+  }
+  if (!object.thumbnail && object.bboxNorm && (object.bboxQuality?.score || 0) >= 0.5) {
     object.thumbnail = captureRegionThumbnail(object.bboxNorm);
   }
   return object;
@@ -1039,7 +1703,8 @@ function renderSceneMemory() {
       <div class="graph-object-body">
         <strong>${escapeHtml(object.id)} · ${escapeHtml(object.label)}</strong>
         <span>${escapeHtml(object.visualDescription || '暂无外观描述')}</span>
-        <span class="graph-object-meta">×${object.seenCount} · ${object.status === 'gone' ? '已离开' : '在场'}</span>
+        <span class="graph-object-meta">×${object.seenCount} · frame ${object.frameIndex || 3} · bbox ${object.bboxQuality?.quality || 'unknown'}${object.thumbnailMeta ? ` · crop ${object.thumbnailMeta.score}` : ''} · ${object.status === 'gone' ? '已离开' : '在场'}</span>
+        ${object.thumbnailMeta ? `<span class="graph-object-debug">裁剪: f${object.thumbnailMeta.frameIndex} ${object.thumbnailMeta.variant}${object.thumbnailMeta.validation ? ` · SSD ${object.thumbnailMeta.validation}` : ''}${object.thumbnailMeta.ssd ? ` · ${object.thumbnailMeta.ssd.class} IoU ${object.thumbnailMeta.ssd.iou}` : ''}</span>` : (object.bboxQuality?.quality === 'poor' ? '<span class="graph-object-debug warn">bbox 不可信，未保存缩略图</span>' : '')}
         <div class="graph-actions">
           <button type="button" data-obj-rename="${object.id}">改名</button>
           <button type="button" data-obj-delete="${object.id}">删除</button>
@@ -1104,17 +1769,18 @@ function describeVlmError(raw) {
 
 function captureVideoFrame() {
   const canvas = document.createElement('canvas');
-  canvas.width = 384;
-  canvas.height = Math.round(384 * (elements.video.videoHeight || 9) / (elements.video.videoWidth || 16));
+  canvas.width = 640;
+  canvas.height = Math.round(640 * (elements.video.videoHeight || 9) / (elements.video.videoWidth || 16));
   const context = canvas.getContext('2d');
   context.drawImage(elements.video, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL('image/jpeg', 0.45);
+  return canvas.toDataURL('image/jpeg', 0.68);
 }
 
 function renderScene() {
   if (!state.scene) {
     elements.sceneStatus.textContent = state.started ? '等待第一次 VLM 场景理解' : '等待摄像头启动';
     elements.sceneSummary.innerHTML = '';
+    renderObjectHud();
     return;
   }
   const scene = state.scene;
@@ -1146,6 +1812,37 @@ function renderScene() {
   elements.sceneSummary.innerHTML = rows.map(([label, value]) => `
     <div><label>${label}</label><strong>${escapeHtml(String(value))}</strong></div>
   `).join('');
+  renderObjectHud();
+}
+
+function renderObjectHud() {
+  if (!elements.objectHud) return;
+  const objects = recentSceneObjects().slice(0, 6);
+  if (!state.started) {
+    elements.objectHud.innerHTML = '<strong>VLM 物体</strong><span>等待摄像头启动</span>';
+    return;
+  }
+  if (state.sceneBusy) {
+    elements.objectHud.innerHTML = '<strong>VLM 物体</strong><span>正在理解当前画面...</span>';
+    return;
+  }
+  if (!objects.length) {
+    const ssdTag = state.ssd?.ready ? ' · SSD 就绪' : (state.ssd?.loading ? ' · SSD 加载中' : '');
+    elements.objectHud.innerHTML = `<strong>VLM 物体</strong><span>等待低频识别结果${ssdTag}</span>`;
+    return;
+  }
+  const cropTag = state.vlmCropStats?.rejected
+    ? ` · SSD拒 ${state.vlmCropStats.rejected}/${(state.vlmCropStats.accepted || 0) + state.vlmCropStats.rejected}`
+    : (state.ssd?.ready ? ' · SSD grounding' : '');
+  elements.objectHud.innerHTML = `
+    <strong>VLM 物体 · ${objects.length}${state.ssd?.ready ? ' · SSD on' : ''}${cropTag}</strong>
+    <ul>${objects.map(object => `
+      <li>
+        ${object.thumbnail ? `<img src="${object.thumbnail}" alt="${escapeHtml(object.label)}" />` : '<i></i>'}
+        <span>${escapeHtml(object.label)}${object.thumbnailMeta?.validation ? ` · ${object.thumbnailMeta.validation}` : ''}</span>
+      </li>
+    `).join('')}</ul>
+  `;
 }
 
 function setCameraDebug(message, tone) {
@@ -1177,18 +1874,98 @@ async function loadFaceLandmarker() {
         delegate: 'GPU',
       },
       runningMode: 'VIDEO',
-      numFaces: 1,
+      numFaces: MAX_FACES,
       outputFaceBlendshapes: true,
       outputFacialTransformationMatrixes: true,
     });
     state.faceModelReady = true;
     elements.faceHud.textContent = 'Face model: ready · waiting for face';
-    addEvent('Face model ready', 'MediaPipe Face Landmarker 已加载：开始读取 landmarks、blendshapes 和头部姿态。');
+    addEvent('Face model ready', `MediaPipe Face Landmarker 已加载：最多 ${MAX_FACES} 张脸 + blendshapes/头部姿态。`);
   } catch (error) {
     state.faceModelError = error.message;
     elements.faceHud.textContent = `Face model failed: ${error.message}`;
-    addEvent('Face model failed', `无法加载 MediaPipe，降级为粗略视频线索：${error.message}`);
+    addEvent('Face model failed', `无法加载 MediaPipe Face，降级为粗略视频线索：${error.message}`);
   }
+}
+
+async function loadPoseLandmarker() {
+  if (state.poseLandmarker || state.poseModelReady) return;
+  try {
+    const vision = await importVisionBundle();
+    const resolver = await createVisionResolver(vision);
+    state.poseLandmarker = await vision.PoseLandmarker.createFromOptions(resolver, {
+      baseOptions: {
+        modelAssetPath: await resolvePoseModelPath(),
+        delegate: 'GPU',
+      },
+      runningMode: 'VIDEO',
+      numPoses: 1,
+    });
+    state.poseModelReady = true;
+    addEvent('Pose model ready', 'MediaPipe Pose 已加载：镜头中将显示躯干骨架。');
+  } catch (error) {
+    state.poseModelError = error.message;
+    addEvent('Pose model failed', `无法加载 Pose Landmarker：${error.message}`);
+  }
+}
+
+async function resolvePoseModelPath() {
+  const paths = [
+    '/vendor/mediapipe/models/pose_landmarker_lite.task',
+    'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+  ];
+  for (const path of paths) {
+    try {
+      const response = await fetch(path, { method: 'HEAD' });
+      if (response.ok) return path;
+    } catch {
+      // Try next path.
+    }
+  }
+  return paths[1];
+}
+
+async function loadHandLandmarker() {
+  if (state.handLandmarker || state.handModelReady) return;
+  const vision = await importVisionBundle();
+  const resolver = await createVisionResolver(vision);
+  const modelPath = await resolveHandModelPath();
+  const handOptions = {
+    baseOptions: { modelAssetPath: modelPath, delegate: 'GPU' },
+    runningMode: 'VIDEO',
+    numHands: 2,
+    minHandDetectionConfidence: 0.35,
+    minHandPresenceConfidence: 0.35,
+    minTrackingConfidence: 0.35,
+  };
+  for (const delegate of ['GPU', 'CPU']) {
+    try {
+      handOptions.baseOptions.delegate = delegate;
+      state.handLandmarker = await vision.HandLandmarker.createFromOptions(resolver, handOptions);
+      state.handModelReady = true;
+      addEvent('Hand model ready', `MediaPipe Hands 已加载（${delegate}）：可识别 👍 / ✌️ / OK 手势。`);
+      return;
+    } catch {
+      // try CPU fallback
+    }
+  }
+  addEvent('Hand model failed', '无法加载 Hand Landmarker。');
+}
+
+async function resolveHandModelPath() {
+  const paths = [
+    '/vendor/mediapipe/models/hand_landmarker.task',
+    'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+  ];
+  for (const path of paths) {
+    try {
+      const response = await fetch(path, { method: 'HEAD' });
+      if (response.ok) return path;
+    } catch {
+      // Try next path.
+    }
+  }
+  return paths[1];
 }
 
 async function resolveFaceModelPath() {
@@ -1270,6 +2047,12 @@ function setupAudio(stream) {
     requestAnimationFrame(tick);
   }
   tick();
+  if (!state.emotion._voiceTimer) {
+    state.emotion._voiceTimer = setInterval(updateVoiceEmotion, 6000);
+  }
+  if (!state.diarization._timer) {
+    state.diarization._timer = setInterval(updatePyannoteDiarization, 10000);
+  }
 }
 
 function buildVoiceDescriptor(samples) {
@@ -1309,6 +2092,9 @@ function analyzeVideo() {
   state.presence = clamp(state.light > 8 ? 58 + state.motion * 0.28 + state.voice * 0.18 : 0);
   inferFaceAndPostureFallback(frame);
   detectFaceSignals();
+  sampleSsdOnVideo();
+  supplementInsightFaceDetections();
+
   updateBaseline();
   state.lastFrame = new Uint8ClampedArray(frame);
   requestAnimationFrame(analyzeVideo);
@@ -1349,19 +2135,82 @@ function inferFaceAndPostureFallback(frame) {
 }
 
 function detectFaceSignals() {
-  if (!state.faceLandmarker || elements.video.readyState < 2) {
-    drawFaceOverlay(null);
+  if (elements.video.readyState < 2) {
+    drawPerceptionOverlay([], null);
+    return;
+  }
+
+  let poseLandmarks = null;
+  if (state.poseLandmarker) {
+    try {
+      const poseResult = state.poseLandmarker.detectForVideo(elements.video, performance.now());
+      poseLandmarks = poseResult.landmarks?.[0] || null;
+    } catch {
+      poseLandmarks = null;
+    }
+  }
+  state.poseLandmarks = poseLandmarks;
+
+  if (state.handLandmarker) {
+    try {
+      const handResult = state.handLandmarker.detectForVideo(elements.video, performance.now());
+      state.handLandmarks = handResult.landmarks || [];
+      state.gestures = state.handLandmarks.map((landmarks, index) => {
+        const gesture = detectHandGesture(landmarks);
+        return gesture ? { ...gesture, handIndex: index, landmarks } : null;
+      }).filter(Boolean);
+    } catch {
+      state.handLandmarks = [];
+      state.gestures = [];
+    }
+  }
+
+  if (!state.faceLandmarker) {
+    drawPerceptionOverlay([], poseLandmarks);
     return;
   }
 
   const result = state.faceLandmarker.detectForVideo(elements.video, performance.now());
-  const landmarks = result.faceLandmarks?.[0];
-  const blendshapes = result.faceBlendshapes?.[0]?.categories || [];
-  state.faceBlendshapes = blendshapes;
-  state.facePresent = Boolean(landmarks);
-  state.faceLandmarkCount = landmarks?.length || 0;
+  const rawFaces = (result.faceLandmarks || []).slice(0, MAX_FACES).map((landmarks, index) => {
+    const bboxNorm = computeFaceBboxNorm(landmarks);
+    return {
+      landmarks,
+      blendshapes: result.faceBlendshapes?.[index]?.categories || [],
+      centerX: landmarks.reduce((sum, point) => sum + point.x, 0) / landmarks.length,
+      area: bboxNorm ? bboxNorm.w * bboxNorm.h : 0,
+    };
+  }).sort((a, b) => a.centerX - b.centerX);
 
-  if (!landmarks) {
+  state.trackedFaces = assignMultiFaceTracks(
+    mergeInsightFaceIntoTracks(
+      rawFaces.map((face, index) => {
+        const bboxNorm = computeFaceBboxNorm(face.landmarks);
+        const cropQuality = assessFaceCropQuality(bboxNorm);
+        return {
+          id: `face_${index}`,
+          index,
+          landmarks: face.landmarks,
+          blendshapes: face.blendshapes,
+          bboxNorm,
+          cropQuality: cropQuality.quality,
+          cropReason: cropQuality.reason,
+        };
+      }),
+      state.insightfaceDetections,
+    ),
+  );
+
+  const primary = [...state.trackedFaces].sort((a, b) => {
+    const areaA = (a.bboxNorm?.w || 0) * (a.bboxNorm?.h || 0);
+    const areaB = (b.bboxNorm?.w || 0) * (b.bboxNorm?.h || 0);
+    return areaB - areaA;
+  })[0] || null;
+
+  state.facePresent = Boolean(primary);
+  state.primaryFaceId = primary?.id || '';
+  state.faceLandmarkCount = primary?.landmarks?.length || 0;
+
+  if (!primary) {
     state.lastFaceLandmarks = null;
     state.lastFaceBboxNorm = null;
     state.lastFaceCropQuality = 'no_face';
@@ -1373,13 +2222,201 @@ function detectFaceSignals() {
       state.eye = clamp(state.eye * 0.9);
       state.mouth = clamp(state.mouth * 0.88);
     }
-    drawFaceOverlay(null);
+    drawPerceptionOverlay([], poseLandmarks);
     renderBlendshapes();
     matchActivePersonLocalFallback();
     return;
   }
 
   state.lastFaceAt = Date.now();
+  applyPrimaryFaceMetrics(primary);
+  matchAllTrackedFaces();
+  updateMultiFaceEmotion();
+
+  drawPerceptionOverlay(state.trackedFaces, poseLandmarks, state.gestures);
+  renderBlendshapes();
+}
+
+function faceCenterNorm(face) {
+  if (face.landmarks?.length) {
+    return {
+      cx: face.landmarks.reduce((sum, point) => sum + point.x, 0) / face.landmarks.length,
+      cy: face.landmarks.reduce((sum, point) => sum + point.y, 0) / face.landmarks.length,
+    };
+  }
+  const arr = bboxNormToArray(face.bboxNorm);
+  if (!arr) return { cx: 0.5, cy: 0.5 };
+  return { cx: arr[0] + arr[2] / 2, cy: arr[1] + arr[3] / 2 };
+}
+
+function assignMultiFaceTracks(faces) {
+  const prev = state.faceTrackPool || [];
+  const used = new Set();
+  const TRACK_IOU = 0.12;
+  const MAX_LOST = 12;
+
+  const next = faces.map(face => {
+    const { cx, cy } = faceCenterNorm(face);
+    const arr = bboxNormToArray(face.bboxNorm);
+    let best = null;
+    let bestScore = 0;
+    prev.forEach(track => {
+      if (used.has(track.id)) return;
+      let score = 0;
+      if (arr && track.bbox) {
+        const iou = bboxIoU(arr, track.bbox);
+        if (iou >= TRACK_IOU) score = iou + (track.hits || 0) * 0.02;
+      }
+      const dist = Math.hypot(track.cx - cx, track.cy - cy);
+      if (dist < 0.16) score = Math.max(score, 0.18 - dist * 0.7 + (track.hits || 0) * 0.015);
+      if (score > bestScore) {
+        bestScore = score;
+        best = track;
+      }
+    });
+    const trackId = bestScore >= TRACK_IOU && best
+      ? best.id
+      : `track_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 6)}`;
+    used.add(trackId);
+    const hits = best && trackId === best.id ? (best.hits || 0) + 1 : 1;
+    return { ...face, trackId, cx, cy, trackHits: hits, trackLost: 0 };
+  });
+
+  const pool = next.map(item => ({
+    id: item.trackId,
+    cx: item.cx,
+    cy: item.cy,
+    bbox: bboxNormToArray(item.bboxNorm),
+    hits: item.trackHits,
+    lost: 0,
+  }));
+  prev.forEach(track => {
+    if (used.has(track.id)) return;
+    const lost = (track.lost || 0) + 1;
+    if (lost <= MAX_LOST) pool.push({ ...track, lost });
+  });
+  state.faceTrackPool = pool.slice(0, MAX_FACES * 3);
+  state.faceTracks = next.map(item => ({ id: item.trackId, cx: item.cx, cy: item.cy, bbox: bboxNormToArray(item.bboxNorm) }));
+  return next;
+}
+
+function handDistance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y, (a.z || 0) - (b.z || 0));
+}
+
+function isFingerExtended(landmarks, tipIdx, pipIdx, mcpIdx, wrist) {
+  const tip = landmarks[tipIdx];
+  const pip = landmarks[pipIdx];
+  const mcp = landmarks[mcpIdx];
+  const tipWrist = handDistance(tip, wrist);
+  const pipWrist = handDistance(pip, wrist);
+  const tipMcp = handDistance(tip, mcp);
+  const pipMcp = handDistance(pip, mcp);
+  if (tipWrist > pipWrist * 1.03) return true;
+  if (tipMcp > pipMcp * 0.9 && tipWrist >= pipWrist * 0.96) return true;
+  if (Math.abs(tip.y - pip.y) > 0.012 && tipMcp > pipMcp * 0.72) return true;
+  return false;
+}
+
+function isFingerCurled(landmarks, tipIdx, pipIdx, mcpIdx, wrist) {
+  if (!isFingerExtended(landmarks, tipIdx, pipIdx, mcpIdx, wrist)) return true;
+  const tip = landmarks[tipIdx];
+  const pip = landmarks[pipIdx];
+  const mcp = landmarks[mcpIdx];
+  return handDistance(tip, pip) < handDistance(pip, mcp) * 0.68;
+}
+
+const HAND_BONES = [
+  [0, 1], [1, 2], [2, 3], [3, 4],
+  [0, 5], [5, 6], [6, 7], [7, 8],
+  [0, 9], [9, 10], [10, 11], [11, 12],
+  [0, 13], [13, 14], [14, 15], [15, 16],
+  [0, 17], [17, 18], [18, 19], [19, 20],
+  [5, 9], [9, 13], [13, 17],
+];
+
+function detectScissorsGesture(landmarks, wrist) {
+  const indexTip = landmarks[8];
+  const middleTip = landmarks[12];
+  const ringTip = landmarks[16];
+  const pinkyTip = landmarks[20];
+  const thumbTip = landmarks[4];
+  const palmCenter = landmarks[9];
+
+  if (handDistance(thumbTip, indexTip) < 0.045) return null;
+
+  const tipSpread = handDistance(indexTip, middleTip);
+  const pipSpread = handDistance(landmarks[6], landmarks[10]);
+  const spread = Math.max(tipSpread, pipSpread * 0.85);
+  if (spread < 0.006) return null;
+
+  const reach = {
+    index: handDistance(indexTip, wrist),
+    middle: handDistance(middleTip, wrist),
+    ring: handDistance(ringTip, wrist),
+    pinky: handDistance(pinkyTip, wrist),
+    thumb: handDistance(thumbTip, wrist),
+  };
+  const maxV = Math.max(reach.index, reach.middle);
+  const minCurled = Math.min(reach.ring, reach.pinky);
+  if (reach.index < reach.ring * 1.008 || reach.middle < reach.ring * 1.008) return null;
+  if (reach.ring > maxV * 0.9 || reach.pinky > maxV * 0.9) return null;
+  if (reach.thumb > maxV * 1.06 && reach.index < reach.thumb * 0.9) return null;
+
+  const idxFromPalm = handDistance(indexTip, palmCenter);
+  const midFromPalm = handDistance(middleTip, palmCenter);
+  const ringFromPalm = handDistance(ringTip, palmCenter);
+  const palmV = idxFromPalm > ringFromPalm * 1.05 && midFromPalm > ringFromPalm * 1.05;
+
+  const zIdx = indexTip.z ?? 0;
+  const zMid = middleTip.z ?? 0;
+  const zRing = ringTip.z ?? 0;
+  const palmFacing = zIdx < zRing + 0.025 && zMid < zRing + 0.025;
+
+  const classic = isFingerExtended(landmarks, 8, 6, 5, wrist)
+    && isFingerExtended(landmarks, 12, 10, 9, wrist)
+    && isFingerCurled(landmarks, 16, 14, 13, wrist)
+    && isFingerCurled(landmarks, 20, 18, 17, wrist);
+
+  const palmMode = palmFacing && palmV && spread > 0.005;
+  const reachMode = (maxV - minCurled) > 0.012 && spread > 0.008 && palmV;
+
+  if (!classic && !palmMode && !reachMode) return null;
+
+  const conf = Math.min(0.95, 0.6 + spread * 2.4 + (palmFacing ? 0.12 : 0) + (maxV - minCurled) * 0.4);
+  return { name: '✌️', confidence: Number(conf.toFixed(2)) };
+}
+
+function detectHandGesture(landmarks) {
+  if (!landmarks?.length || landmarks.length < 21) return null;
+  const wrist = landmarks[0];
+  const thumbTip = landmarks[4];
+  const indexTip = landmarks[8];
+
+  const okDist = handDistance(thumbTip, indexTip);
+  if (okDist < 0.045) {
+    return { name: 'OK', confidence: Number((1 - okDist / 0.045).toFixed(2)) };
+  }
+
+  const scissors = detectScissorsGesture(landmarks, wrist);
+  if (scissors) return scissors;
+
+  const thumbExtended = handDistance(thumbTip, wrist) > handDistance(landmarks[3], wrist) * 1.08;
+  const fingerDefs = [[8, 6, 5], [12, 10, 9], [16, 14, 13], [20, 18, 17]];
+  const othersCurled = fingerDefs.every(([tip, pip, mcp]) => isFingerCurled(landmarks, tip, pip, mcp, wrist));
+  if (thumbExtended && othersCurled) {
+    return { name: '👍', confidence: 0.84 };
+  }
+
+  return null;
+}
+
+function applyPrimaryFaceMetrics(face) {
+  if (!face.landmarks?.length) {
+    applyPrimaryFaceMetricsFromBbox(face);
+    return;
+  }
+  const { landmarks, blendshapes } = face;
   const score = name => blendshapes.find(item => item.categoryName === name)?.score || 0;
   const smile = (score('mouthSmileLeft') + score('mouthSmileRight')) / 2;
   const brow = (score('browDownLeft') + score('browDownRight') + score('browInnerUp')) / 3;
@@ -1404,16 +2441,25 @@ function detectFaceSignals() {
   state.brow = clamp(brow * 100);
   state.eye = clamp((1 - blink) * 100);
   state.mouth = clamp(jawOpen * 100);
+  state.faceBlendshapes = blendshapes;
   state.faceDescriptor = buildFaceDescriptor(landmarks, blendshapes);
   state.lastFaceLandmarks = landmarks;
-  state.lastFaceBboxNorm = computeFaceBboxNorm(landmarks);
-  const cropQuality = assessFaceCropQuality(state.lastFaceBboxNorm);
-  state.lastFaceCropQuality = cropQuality.quality;
-  state.lastFaceCropReason = cropQuality.reason;
-  matchActivePerson();
+  state.lastFaceBboxNorm = face.bboxNorm;
+  state.lastFaceCropQuality = face.cropQuality;
+  state.lastFaceCropReason = face.cropReason;
+}
 
-  drawFaceOverlay(landmarks);
-  renderBlendshapes();
+function applyPrimaryFaceMetricsFromBbox(face) {
+  state.faceBlendshapes = [];
+  state.lastFaceLandmarks = null;
+  state.lastFaceBboxNorm = face.bboxNorm;
+  state.lastFaceCropQuality = face.cropQuality;
+  state.lastFaceCropReason = face.cropReason;
+  state.gaze = clamp(state.gaze * 0.92);
+  state.smile = clamp(state.smile * 0.9);
+  state.brow = clamp(state.brow * 0.9);
+  state.eye = clamp(state.eye * 0.94);
+  state.mouth = clamp(state.mouth * 0.9);
 }
 
 function buildFaceDescriptor(landmarks, blendshapes) {
@@ -1508,9 +2554,10 @@ function matchActivePersonLocalFallback() {
   renderPeople();
 }
 
-async function matchActivePerson() {
+async function matchAllTrackedFaces() {
   if (!state.people.length) {
     state.faceMatch = { personId: '', score: 0, provider: '', candidates: [] };
+    state.multiFaceMatches = {};
     resolveActiveIdentity();
     renderPeople();
     return;
@@ -1522,13 +2569,11 @@ async function matchActivePerson() {
     return;
   }
 
-  if (!state.facePresent || state.lastFaceCropQuality !== 'good') {
-    matchActivePersonLocalFallback();
-    return;
-  }
-
-  const faceCrop = captureFaceCrop({ forEnroll: true });
-  if (!faceCrop) {
+  const goodFaces = state.trackedFaces.filter(face => {
+    if (face.cropQuality === 'good' || face.cropQuality === 'ok') return true;
+    return face.source === 'insightface' && (face.ifDetScore || 0) >= 0.5;
+  });
+  if (!goodFaces.length) {
     matchActivePersonLocalFallback();
     return;
   }
@@ -1546,35 +2591,57 @@ async function matchActivePerson() {
   if (state.faceMatchInFlight) return;
   state.faceMatchInFlight = true;
   state.lastFaceMatchAt = now;
+
+  const crops = goodFaces.map(face => ({
+    faceId: face.trackId || face.id,
+    faceCrop: captureFaceCropFromBbox(face.bboxNorm, { forEnroll: true }),
+  })).filter(item => item.faceCrop);
+
+  if (!crops.length) {
+    state.faceMatchInFlight = false;
+    matchActivePersonLocalFallback();
+    return;
+  }
+
   try {
-    const response = await fetch('/api/identity/face/match', {
+    const response = await fetch('/api/identity/face/match-multi', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        faceCrop,
+        crops,
         candidates,
         threshold: state.faceMatchThreshold,
       }),
     });
     const data = await response.json();
-    const matches = Array.isArray(data.matches) ? data.matches : [];
-    const top = matches[0];
-    const threshold = Number(data.threshold || state.faceMatchThreshold);
-    const matched = Boolean(data.matched && top) || Boolean(top && top.score >= threshold);
-    state.faceMatch = {
-      personId: matched && top ? top.personId : '',
-      score: top?.score || 0,
-      provider: data.ok ? (data.provider || 'insightface_arcface') : 'mediapipe_descriptor_adapter',
-      detScore: data.detScore,
-      candidates: matches,
-    };
     if (!data.ok) {
-      addEvent('人脸匹配降级', `${data.provider || 'insightface'}: ${data.error || 'not_ready'} · ${data.detail || ''}`);
+      addEvent('多人脸匹配降级', `${data.error || 'not_ready'} · ${data.detail || ''}`);
       matchActivePersonLocalFallback();
       return;
     }
+    const results = Array.isArray(data.results) ? data.results : [];
+    state.multiFaceMatches = {};
+    results.forEach(item => {
+      if (!item.faceId) return;
+      state.multiFaceMatches[item.faceId] = {
+        personId: item.matched ? item.personId : '',
+        score: item.score || 0,
+        provider: data.provider || 'insightface_arcface',
+        candidates: item.matches || [],
+      };
+    });
+    const primary = state.trackedFaces.find(face => face.id === state.primaryFaceId);
+    const primaryKey = primary?.trackId || primary?.id;
+    const primaryMatch = primaryKey ? state.multiFaceMatches[primaryKey] : null;
+    state.faceMatch = {
+      personId: primaryMatch?.personId || '',
+      score: primaryMatch?.score || 0,
+      provider: data.provider || 'insightface_arcface',
+      detScore: data.detScore,
+      candidates: primaryMatch?.candidates || [],
+    };
   } catch (error) {
-    addEvent('人脸匹配失败', `使用 MediaPipe fallback：${error.message}`);
+    addEvent('多人脸匹配失败', `使用 MediaPipe fallback：${error.message}`);
     matchActivePersonLocalFallback();
     return;
   } finally {
@@ -1582,6 +2649,10 @@ async function matchActivePerson() {
   }
   resolveActiveIdentity();
   renderPeople();
+}
+
+async function matchActivePerson() {
+  return matchAllTrackedFaces();
 }
 
 function matchVoicePerson() {
@@ -1627,7 +2698,7 @@ function resolveActiveIdentity() {
   }
 }
 
-function drawFaceOverlay(landmarks) {
+function drawPerceptionOverlay(faces, poseLandmarks, gestures = []) {
   const canvas = elements.faceOverlay;
   const context = canvas.getContext('2d');
   const rect = elements.video.getBoundingClientRect();
@@ -1638,66 +2709,241 @@ function drawFaceOverlay(landmarks) {
     canvas.height = height;
   }
   context.clearRect(0, 0, canvas.width, canvas.height);
-  drawSceneObjectOverlays(context, canvas.width, canvas.height);
 
-  if (!landmarks) {
+  if (poseLandmarks?.length) {
+    drawPoseSkeleton(context, canvas, poseLandmarks);
+  }
+  if (state.handLandmarks?.length) {
+    drawHandSkeleton(context, canvas, state.handLandmarks);
+  }
+  if (gestures?.length) {
+    drawGestureLabels(context, canvas, gestures);
+  }
+  if (state.debug?.ssdOverlay && state.ssd?.detections?.length) {
+    drawSsdOverlay(context, canvas, state.ssd.detections);
+  }
+  if (state.debug?.insightfaceOverlay && state.insightfaceDetections?.length) {
+    drawInsightfaceOverlay(context, canvas, state.insightfaceDetections);
+  }
+
+  if (!faces?.length) {
     const objCount = recentSceneObjects().length;
+    const poseTag = state.poseModelReady ? ' · pose on' : '';
+    const handTag = state.gestures.length ? ` · ${state.gestures.map(g => g.name).join('/')}` : '';
+    const diaTag = state.diarization.segments.length
+      ? ` · pyannote ${state.diarization.segments.length} seg`
+      : '';
     elements.faceHud.textContent = state.faceModelReady
-      ? (objCount ? `Face model: ready · no face · ${objCount} object(s) from VLM` : 'Face model: ready · no face detected')
+      ? (objCount ? `Face: no face · ${objCount} VLM object(s)${poseTag}${handTag}${diaTag}` : `Face: ready · no face${poseTag}${handTag}${diaTag}`)
       : 'Face model: loading...';
     return;
   }
 
-  const left = Math.min(...landmarks.map(point => point.x)) * canvas.width;
-  const right = Math.max(...landmarks.map(point => point.x)) * canvas.width;
-  const top = Math.min(...landmarks.map(point => point.y)) * canvas.height;
-  const bottom = Math.max(...landmarks.map(point => point.y)) * canvas.height;
+  faces.forEach((face, index) => {
+    drawSingleFaceOverlay(context, canvas, face, index, face.id === state.primaryFaceId);
+  });
+
+  const objCount = recentSceneObjects().length;
+  const primary = faces.find(item => item.id === state.primaryFaceId) || faces[0];
+  const emoTag = state.emotion.faces[primary?.id]?.emotion || state.emotion.faces[primary?.trackId]?.emotion || '';
+  const gestureTag = state.gestures.length ? state.gestures.map(g => g.name).join('/') : '';
+  elements.faceHud.textContent = [
+    `${faces.length} face(s) tracked`,
+    primary ? `primary ${Math.round(state.smile)}% smile` : '',
+    emoTag ? `emo ${emoTag}` : '',
+    gestureTag ? `gesture ${gestureTag}` : '',
+    state.poseModelReady ? 'pose on' : '',
+    objCount ? `VLM ${objCount}` : '',
+  ].filter(Boolean).join(' · ');
+}
+
+function drawSsdOverlay(context, canvas, detections) {
+  context.save();
+  context.setLineDash([6, 4]);
+  context.lineWidth = 2;
+  context.font = '600 11px Inter, sans-serif';
+  detections.forEach(det => {
+    if (!det.bboxNorm) return;
+    const [x, y, w, h] = det.bboxNorm;
+    const left = x * canvas.width;
+    const top = y * canvas.height;
+    const width = w * canvas.width;
+    const height = h * canvas.height;
+    context.strokeStyle = 'rgba(162, 245, 191, 0.85)';
+    context.strokeRect(left, top, width, height);
+    const label = `${det.class} ${Math.round((det.score || 0) * 100)}%`;
+    context.fillStyle = 'rgba(162, 245, 191, 0.88)';
+    context.fillRect(left, Math.max(0, top - 16), context.measureText(label).width + 10, 14);
+    context.fillStyle = '#0f1016';
+    context.fillText(label, left + 4, Math.max(10, top - 4));
+  });
+  context.restore();
+}
+
+function drawInsightfaceOverlay(context, canvas, detections) {
+  context.save();
+  context.setLineDash([4, 3]);
+  context.lineWidth = 2;
+  context.strokeStyle = 'rgba(199, 146, 255, 0.9)';
+  context.font = '600 11px Inter, sans-serif';
+  detections.forEach((det, index) => {
+    const bbox = det.bboxNorm;
+    if (!bbox) return;
+    const x = bbox.x ?? bbox[0];
+    const y = bbox.y ?? bbox[1];
+    const w = bbox.w ?? bbox[2];
+    const h = bbox.h ?? bbox[3];
+    const left = x * canvas.width;
+    const top = y * canvas.height;
+    context.strokeRect(left, top, w * canvas.width, h * canvas.height);
+    const label = `IF${index + 1} ${Math.round((det.detScore || 0) * 100)}%`;
+    context.fillStyle = 'rgba(199, 146, 255, 0.88)';
+    context.fillRect(left, top + h * canvas.height + 2, context.measureText(label).width + 10, 14);
+    context.fillStyle = '#0f1016';
+    context.fillText(label, left + 4, top + h * canvas.height + 12);
+  });
+  context.restore();
+}
+
+function drawHandSkeleton(context, canvas, hands) {
+  context.save();
+  context.lineWidth = 2;
+  context.strokeStyle = 'rgba(255, 214, 102, 0.75)';
+  context.fillStyle = 'rgba(255, 214, 102, 0.95)';
+  hands.forEach(landmarks => {
+    if (!landmarks?.length) return;
+    HAND_BONES.forEach(([a, b]) => {
+      const p1 = landmarks[a];
+      const p2 = landmarks[b];
+      if (!p1 || !p2) return;
+      context.beginPath();
+      context.moveTo(p1.x * canvas.width, p1.y * canvas.height);
+      context.lineTo(p2.x * canvas.width, p2.y * canvas.height);
+      context.stroke();
+    });
+    landmarks.forEach(pt => {
+      if (!pt) return;
+      context.beginPath();
+      context.arc(pt.x * canvas.width, pt.y * canvas.height, 3, 0, Math.PI * 2);
+      context.fill();
+    });
+  });
+  context.restore();
+}
+
+function drawGestureLabels(context, canvas, gestures) {
+  gestures.forEach((gesture, index) => {
+    const wrist = gesture.landmarks?.[0];
+    if (!wrist) return;
+    const x = wrist.x * canvas.width;
+    const y = Math.max(24, wrist.y * canvas.height - 20 - index * 22);
+    const label = `${gesture.name} ${Math.round(gesture.confidence * 100)}%`;
+    context.font = '700 14px Inter, sans-serif';
+    const width = context.measureText(label).width + 14;
+    context.fillStyle = 'rgba(199, 146, 255, 0.92)';
+    context.fillRect(x - 6, y - 16, width, 22);
+    context.fillStyle = '#0f1016';
+    context.fillText(label, x, y);
+  });
+}
+
+function drawPoseSkeleton(context, canvas, landmarks) {
+  const visible = point => (point.visibility == null || point.visibility > 0.5) && (point.presence == null || point.presence > 0.5);
+  const px = point => point.x * canvas.width;
+  const py = point => point.y * canvas.height;
 
   context.save();
-  context.shadowColor = 'rgba(123, 223, 242, 0.9)';
-  context.shadowBlur = 16;
-  context.strokeStyle = 'rgba(123, 223, 242, 0.95)';
-  context.lineWidth = 4;
-  context.strokeRect(left, top, right - left, bottom - top);
+  context.lineWidth = 3;
+  context.lineCap = 'round';
+  context.strokeStyle = 'rgba(255, 189, 102, 0.88)';
+  context.shadowColor = 'rgba(255, 189, 102, 0.55)';
+  context.shadowBlur = 10;
+  POSE_CONNECTIONS.forEach(([start, end]) => {
+    const a = landmarks[start];
+    const b = landmarks[end];
+    if (!a || !b || !visible(a) || !visible(b)) return;
+    context.beginPath();
+    context.moveTo(px(a), py(a));
+    context.lineTo(px(b), py(b));
+    context.stroke();
+  });
   context.restore();
 
   context.fillStyle = 'rgba(255, 189, 102, 0.95)';
-  for (let index = 0; index < landmarks.length; index += 6) {
-    const point = landmarks[index];
+  landmarks.forEach((point, index) => {
+    if (!visible(point)) return;
+    const radius = [11, 12, 23, 24].includes(index) ? 5 : 3.5;
     context.beginPath();
-    context.arc(point.x * canvas.width, point.y * canvas.height, 1.7, 0, Math.PI * 2);
-    context.fill();
-  }
-
-  const featurePoints = [10, 33, 61, 133, 152, 159, 263, 291, 362, 386, 454, 468, 473];
-  context.fillStyle = 'rgba(162, 245, 191, 0.98)';
-  featurePoints.forEach(index => {
-    const point = landmarks[index];
-    if (!point) return;
-    context.beginPath();
-    context.arc(point.x * canvas.width, point.y * canvas.height, 4, 0, Math.PI * 2);
+    context.arc(px(point), py(point), radius, 0, Math.PI * 2);
     context.fill();
   });
-
-  const label = [
-    `bbox ${Math.round(right - left)}x${Math.round(bottom - top)}`,
-    `yaw ${Math.round(state.headYaw)}`,
-    `pitch ${Math.round(state.headPitch)}`,
-    `smile ${Math.round(state.smile)}`,
-    `brow ${Math.round(state.brow)}`,
-    `eye ${Math.round(state.eye)}`,
-    `mouth ${Math.round(state.mouth)}`,
-  ].join(' · ');
-  context.font = '700 13px Inter, sans-serif';
-  context.fillStyle = 'rgba(15, 16, 22, 0.82)';
-  context.fillRect(left, Math.max(0, top - 32), Math.min(canvas.width - left, 520), 26);
-  context.fillStyle = '#7bdff2';
-  context.fillText(label, left + 10, Math.max(18, top - 13));
-  const objCount = recentSceneObjects().length;
-  elements.faceHud.textContent = `Face tracked · ${landmarks.length} landmarks · ${state.faceBlendshapes.length} blendshape fields · ${label}${objCount ? ` · VLM objects ${objCount}` : ''}`;
 }
 
-// VLM 返回的物体 bbox 画在视频上（橙色框）；人脸框仍是 MediaPipe 实时绘制。
+function drawSingleFaceOverlay(context, canvas, face, index, isPrimary) {
+  const { blendshapes, id } = face;
+  const color = FACE_COLORS[index % FACE_COLORS.length];
+  const box = faceBoxPixels(face, canvas);
+  if (!box) return;
+  const { left, right, top, bottom } = box;
+
+  context.save();
+  if (face.source === 'insightface') context.setLineDash([5, 4]);
+  else if (face.source === 'fused') context.setLineDash([2, 2]);
+  context.shadowColor = `${color}cc`;
+  context.shadowBlur = isPrimary ? 16 : 8;
+  context.strokeStyle = isPrimary ? color : `${color}cc`;
+  context.lineWidth = isPrimary ? 4 : 2.5;
+  context.strokeRect(left, top, right - left, bottom - top);
+  context.restore();
+
+  const srcTag = face.source === 'fused' ? '·IF+MP' : (face.source === 'insightface' ? '·IF' : '');
+  const faceEmotion = state.emotion.faces[id] || state.emotion.faces[face.trackId];
+  const trackMatch = face.trackId ? state.multiFaceMatches[face.trackId] : null;
+  const matchedPerson = trackMatch?.personId
+    ? state.people.find(person => person.id === trackMatch.personId)
+    : null;
+  const person = isPrimary ? activePerson() : matchedPerson;
+  const personName = person?.name || (isPrimary ? '未知用户' : `T${String(face.trackId || index).slice(-4)}`);
+  const identityScore = isPrimary && state.faceMatch.score > 0
+    ? `(${Math.round(state.faceMatch.score * 100)}%)`
+    : (trackMatch?.score ? `(${Math.round(trackMatch.score * 100)}%)` : (isPrimary && state.explicitPersonId ? '(显式)' : ''));
+
+  const speaking = isPrimary && state.voice > 18;
+  if (speaking) {
+    context.save();
+    context.strokeStyle = 'rgba(255, 189, 102, 0.82)';
+    context.lineWidth = 2.5;
+    const cx = (left + right) / 2;
+    const cy = (top + bottom) / 2;
+    const radius = Math.max(right - left, bottom - top) / 2 + 10;
+    context.beginPath();
+    context.arc(cx, cy, radius, 0, Math.PI * 2);
+    context.stroke();
+    context.restore();
+  }
+
+  context.font = '700 13px Inter, sans-serif';
+  const emoLabel = faceEmotion?.emotion ? ` · ${faceEmotion.emotion}` : '';
+  const micTag = speaking ? ' 🎤' : '';
+  const identityTag = `${personName}${identityScore}${emoLabel}${micTag}${srcTag}`;
+  const tagWidth = context.measureText(identityTag).width + 16;
+  context.fillStyle = isPrimary ? 'rgba(162, 245, 191, 0.95)' : `${color}88`;
+  context.fillRect(left - 4, Math.max(0, top - 44), Math.min(canvas.width - left + 8, tagWidth), 22);
+  context.fillStyle = '#0f1016';
+  context.fillText(identityTag, left + 4, Math.max(16, top - 26));
+
+  if (isPrimary && blendshapes?.length) {
+    const score = name => blendshapes.find(item => item.categoryName === name)?.score || 0;
+    const smile = Math.round(((score('mouthSmileLeft') + score('mouthSmileRight')) / 2) * 100);
+    const label = `bbox ${Math.round(right - left)}x${Math.round(bottom - top)} · smile ${smile}`;
+    context.fillStyle = 'rgba(15, 16, 22, 0.82)';
+    context.fillRect(left, Math.max(20, top - 22), Math.min(canvas.width - left, 260), 20);
+    context.fillStyle = color;
+    context.fillText(label, left + 8, Math.max(35, top - 8));
+  }
+}
+
+// VLM 返回的物体不画在视频上；只用于关系库缩略图和悬浮物体列表。
 function recentSceneObjects() {
   const cutoff = Date.now() - 45000;
   return state.sceneMemory.objects.filter(object =>
@@ -1705,29 +2951,6 @@ function recentSceneObjects() {
     && object.bboxNorm
     && new Date(object.lastSeen).getTime() >= cutoff
   );
-}
-
-function drawSceneObjectOverlays(context, width, height) {
-  recentSceneObjects().forEach(object => {
-    const [x, y, w, h] = object.bboxNorm;
-    const left = x * width;
-    const top = y * height;
-    const boxW = w * width;
-    const boxH = h * height;
-    context.save();
-    context.strokeStyle = 'rgba(255, 189, 102, 0.95)';
-    context.lineWidth = 3;
-    context.setLineDash([8, 4]);
-    context.strokeRect(left, top, boxW, boxH);
-    context.setLineDash([]);
-    context.font = '700 12px Inter, sans-serif';
-    context.fillStyle = 'rgba(15, 16, 22, 0.82)';
-    const tag = `${object.id} · ${object.label}`;
-    context.fillRect(left, Math.max(0, top - 22), Math.min(width - left, tag.length * 7 + 16), 20);
-    context.fillStyle = '#ffbd66';
-    context.fillText(tag, left + 6, Math.max(14, top - 7));
-    context.restore();
-  });
 }
 
 function renderBlendshapes() {
@@ -1784,6 +3007,26 @@ function inferInteractionState() {
   state.energy = clamp(50 + voiceDelta * 0.32 + motionDelta * 0.38 + postureDelta * 0.28 + eyeDelta * 0.18 + (state.light - state.baseline.light) * 0.1);
   state.quietNeed = clamp((quietOverride ? 72 : 16) + (focusedScene ? 18 : 0) + Math.max(0, -voiceDelta) * 0.72 + Math.max(0, -motionDelta) * 0.62 + Math.max(0, -postureDelta) * 0.32 + Math.max(0, state.brow - state.baseline.brow) * 0.18 - Math.max(0, gazeDelta) * 0.22 - Math.max(0, smileDelta) * 0.18);
   state.readiness = clamp(28 + (openScene ? 12 : 0) + state.gaze * 0.3 + state.smile * 0.24 + state.voice * 0.18 + state.presence * 0.16 - state.quietNeed * 0.32 - state.feedback.bad * 8 + state.feedback.good * 5);
+
+  // 多模态情绪信号微调（仅在置信且新鲜时参与，且只是“线索”，不是诊断）。
+  const fused = state.emotion.fused;
+  const emoActive = state.emotion.fused.confidence > 0.25 && emotionIsFresh();
+  if (emoActive) {
+    const emoValence = clampNum(fused.valence, -1, 1);
+    const emoArousal = clampNum(fused.arousal, -1, 1);
+    state.arousal = clamp(state.arousal + emoArousal * 16);
+    state.energy = clamp(state.energy + emoValence * 8 + Math.max(0, emoArousal) * 4);
+    state.quietNeed = clamp(state.quietNeed + Math.max(0, -emoValence) * 12 + Math.max(0, -emoArousal) * 8);
+    state.readiness = clamp(state.readiness + Math.max(0, emoValence) * 10);
+    const zh = EMOTION_LABEL_ZH[fused.emotion] || fused.emotion;
+    const drivers = [];
+    if (emoArousal > 0.15) drivers.push('arousal 上调');
+    if (emoValence < -0.15) drivers.push('quiet need 上调');
+    if (emoValence > 0.2) drivers.push('readiness 上调');
+    state.emotion.policyNote = `情绪信号「${zh}」(val ${emoValence.toFixed(2)} / aro ${emoArousal.toFixed(2)}, 置信 ${Math.round(fused.confidence * 100)}%)${drivers.length ? '：' + drivers.join('、') : '：未显著改变策略'}`;
+  } else {
+    state.emotion.policyNote = '情绪信号置信不足或已过期，未参与策略。';
+  }
 
   if (quietOverride || state.quietNeed > 70) return ['needs_quiet', 0.76];
   if (state.arousal > 72) return ['high_arousal', 0.7];
@@ -1909,8 +3152,10 @@ function updateReasoning() {
     addEvent('互动状态更新', `从 ${priorState} 调整为 ${interactionState}，置信度 ${Math.round(confidence * 100)}%。`);
   }
 
+  sampleEmotionHistory();
   renderSignals();
   renderState(intervention);
+  renderEmotion();
 }
 
 function renderSignals() {
@@ -1928,9 +3173,18 @@ function renderSignals() {
   ];
   values.forEach(([name, value]) => {
     elements[`${name}Meter`].value = value;
-    elements[`${name}Text`].textContent = name === 'presence'
-      ? value > 45 ? '人在场' : '不确定'
-      : `${Math.round(value)}%`;
+    if (name === 'presence') {
+      elements[`${name}Text`].textContent = value > 45 ? '人在场' : '不确定';
+      return;
+    }
+    if (name === 'voice') {
+      const segCount = state.diarization.segments.length;
+      const speakers = state.diarization.speakerEstimate || (segCount ? 1 : 0);
+      const diaTag = segCount ? ` · ${segCount}段/${speakers || '?'}人` : '';
+      elements[`${name}Text`].textContent = `${Math.round(value)}%${diaTag}`;
+      return;
+    }
+    elements[`${name}Text`].textContent = `${Math.round(value)}%`;
   });
 }
 
@@ -1946,7 +3200,9 @@ function renderState(intervention) {
     ['互动状态', `${state.interactionState} · ${Math.round(state.confidence * 100)}% confidence`],
     ['Readiness / Arousal', `${Math.round(state.readiness)} / ${Math.round(state.arousal)}`],
     ['Energy / Quiet need', `${Math.round(state.energy)} / ${Math.round(state.quietNeed)}`],
-    ['Face tracking', state.faceModelReady ? `${state.facePresent ? 'face present' : 'no face'} · yaw ${Math.round(state.headYaw)} · pitch ${Math.round(state.headPitch)}` : `loading/fallback${state.faceModelError ? ' · failed' : ''}`],
+    ['Face tracking', state.faceModelReady
+      ? `${state.trackedFaces.length || (state.facePresent ? 1 : 0)} face(s) · pose ${state.poseModelReady ? 'on' : 'off'} · yaw ${Math.round(state.headYaw)}`
+      : `loading/fallback${state.faceModelError ? ' · failed' : ''}`],
     ['个人基线', `${state.baseline.samples} samples · voice ${Math.round(state.baseline.voice)} · smile ${Math.round(state.baseline.smile)}`],
     ['边界条件', Date.now() < state.quietUntil ? '用户要求安静中' : '可被用户撤销'],
   ].map(([label, value]) => `<div><label>${label}</label><strong>${value}</strong></div>`).join('');
@@ -2127,9 +3383,12 @@ function normalizeLocalDescriptor(descriptor) {
 }
 
 function captureFaceCrop(options = {}) {
+  return captureFaceCropFromBbox(state.lastFaceBboxNorm, options);
+}
+
+function captureFaceCropFromBbox(baseBbox, options = {}) {
   const forEnroll = Boolean(options.forEnroll);
   const video = elements.video;
-  const baseBbox = state.lastFaceBboxNorm;
   if (!video?.videoWidth || !video?.videoHeight || !baseBbox) return null;
   const bbox = forEnroll ? expandBboxNorm(baseBbox, 0.38) : baseBbox;
   const sx = Math.round(bbox.x * video.videoWidth);
@@ -2341,22 +3600,53 @@ elements.enrollVoiceButton.addEventListener('click', async () => {
 
 function recordVoiceSample() {
   return new Promise((resolve, reject) => {
-    const recorder = new MediaRecorder(state.audioStream);
+    const options = MediaRecorder.isTypeSupported?.('audio/webm;codecs=opus')
+      ? { mimeType: 'audio/webm;codecs=opus' }
+      : undefined;
+    const recorder = new MediaRecorder(state.audioStream, options);
     const chunks = [];
+    let settled = false;
+    const timeout = setTimeout(() => {
+      try { if (recorder.state !== 'inactive') recorder.stop(); } catch {}
+      if (!settled) {
+        settled = true;
+        reject(new Error('media_recorder_timeout'));
+      }
+    }, 5000);
+    const finish = (handler, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      handler(value);
+    };
     recorder.ondataavailable = event => {
       if (event.data.size) chunks.push(event.data);
     };
-    recorder.onerror = event => reject(event.error || new Error('media_recorder_error'));
+    recorder.onerror = event => finish(reject, event.error || new Error('media_recorder_error'));
     recorder.onstop = () => {
+      if (!chunks.length) {
+        finish(reject, new Error('empty_audio_sample'));
+        return;
+      }
       const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
       const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(reader.error || new Error('file_reader_error'));
+      reader.onload = () => finish(resolve, reader.result);
+      reader.onerror = () => finish(reject, reader.error || new Error('file_reader_error'));
       reader.readAsDataURL(blob);
     };
     recorder.start();
-    setTimeout(() => recorder.stop(), 3000);
+    setTimeout(() => {
+      try { if (recorder.state !== 'inactive') recorder.stop(); } catch {}
+    }, 3000);
   });
+}
+
+function fetchJsonWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal })
+    .then(response => response.json())
+    .finally(() => clearTimeout(timeout));
 }
 
 function mergeDescriptor(oldDescriptor, newDescriptor, oldSamples) {
@@ -2383,6 +3673,730 @@ renderBlendshapes();
 renderScene();
 renderSceneMemory();
 renderState(chooseIntervention());
+renderDiarization();
+
+if (elements.ssdOverlayToggle) {
+  elements.ssdOverlayToggle.checked = Boolean(state.debug.ssdOverlay);
+  elements.ssdOverlayToggle.addEventListener('change', () => {
+    state.debug.ssdOverlay = elements.ssdOverlayToggle.checked;
+    localStorage.setItem('hri-demo-ssd-overlay', JSON.stringify(state.debug.ssdOverlay));
+  });
+}
+if (elements.ifOverlayToggle) {
+  elements.ifOverlayToggle.checked = Boolean(state.debug.insightfaceOverlay);
+  elements.ifOverlayToggle.addEventListener('change', () => {
+    state.debug.insightfaceOverlay = elements.ifOverlayToggle.checked;
+    localStorage.setItem('hri-demo-if-overlay', JSON.stringify(state.debug.insightfaceOverlay));
+  });
+}
+
+// ===================== 多模态情绪信号（非心理诊断） =====================
+// 面部 ViT-FER + 语音 WavLM SER，经 MDAT 融合到 valence-arousal。
+// 仅作为陪伴语气和主动性的参考线索，绝不作为心理诊断。
+
+const EMOTION_VA = {
+  happy: [0.80, 0.50], neutral: [0.0, 0.0], sad: [-0.70, -0.40], angry: [-0.60, 0.70],
+  fear: [-0.60, 0.60], disgust: [-0.60, 0.30], surprise: [0.30, 0.70], contempt: [-0.40, 0.20],
+};
+const EMOTION_EMOJI = {
+  happy: '😊', neutral: '😐', sad: '😔', angry: '😠', fear: '😨', disgust: '😖', surprise: '😲', contempt: '😒',
+};
+const EMOTION_LABEL_ZH = {
+  happy: '愉悦', neutral: '平静', sad: '低落', angry: '紧绷', fear: '紧张', disgust: '厌恶', surprise: '惊讶', contempt: '轻蔑',
+};
+const EMOTION_COLOR = {
+  happy: '#a2f5bf', neutral: '#bfb4aa', sad: '#7bdff2', angry: '#ff7a90',
+  fear: '#b69cff', disgust: '#9ad6b0', surprise: '#ffbd66', contempt: '#d7a0ff',
+};
+const EMOTION_CANON = {
+  anger: 'angry', ang: 'angry', angry: 'angry', happiness: 'happy', hap: 'happy', happy: 'happy', joy: 'happy',
+  sadness: 'sad', sad: 'sad', neutral: 'neutral', neu: 'neutral', calm: 'neutral', fear: 'fear', fearful: 'fear',
+  disgust: 'disgust', surprise: 'surprise', surprised: 'surprise', contempt: 'contempt',
+};
+
+function canonEmotion(label) {
+  const key = String(label || '').trim().toLowerCase();
+  return EMOTION_CANON[key] || key || 'neutral';
+}
+
+function normScores(scores) {
+  const out = {};
+  let total = 0;
+  Object.entries(scores || {}).forEach(([label, value]) => {
+    const canon = canonEmotion(label);
+    const num = Number(value) || 0;
+    out[canon] = (out[canon] || 0) + num;
+    total += num;
+  });
+  if (total > 0) Object.keys(out).forEach(key => { out[key] = Number((out[key] / total).toFixed(4)); });
+  return out;
+}
+
+function topEmotion(scores) {
+  let best = 'neutral';
+  let bestValue = -Infinity;
+  Object.entries(scores || {}).forEach(([label, value]) => {
+    if (value > bestValue) { bestValue = value; best = label; }
+  });
+  return best;
+}
+
+function scoresToVA(scores) {
+  let valence = 0;
+  let arousal = 0;
+  Object.entries(scores || {}).forEach(([label, prob]) => {
+    const va = EMOTION_VA[label];
+    if (!va) return;
+    valence += va[0] * prob;
+    arousal += va[1] * prob;
+  });
+  return [Number(valence.toFixed(4)), Number(arousal.toFixed(4))];
+}
+
+function smoothEmotionScores(prevScores, newScores, alpha = 0.38) {
+  const keys = new Set([...Object.keys(prevScores || {}), ...Object.keys(newScores || {})]);
+  const blended = {};
+  keys.forEach(key => {
+    blended[key] = (prevScores?.[key] || 0) * (1 - alpha) + (newScores[key] || 0) * alpha;
+  });
+  return normScores(blended);
+}
+
+function storeFaceEmotion(faceId, incoming) {
+  const prev = state.emotion.faces[faceId];
+  const isReal = incoming.provider && !String(incoming.provider).endsWith('fallback');
+  let scores = normScores(incoming.scores || {});
+  if (prev?.scores && isReal) {
+    scores = smoothEmotionScores(prev.scores, scores);
+  }
+  const emotion = canonEmotion(incoming.emotion || topEmotion(scores));
+  const [valence, arousal] = incoming.valence != null && incoming.arousal != null
+    ? [Number(incoming.valence), Number(incoming.arousal)]
+    : scoresToVA(scores);
+  const smoothedValence = prev && isReal ? Number(((prev.valence || 0) * 0.55 + valence * 0.45).toFixed(4)) : valence;
+  const smoothedArousal = prev && isReal ? Number(((prev.arousal || 0) * 0.55 + arousal * 0.45).toFixed(4)) : arousal;
+  state.emotion.faces[faceId] = {
+    emotion,
+    scores,
+    valence: smoothedValence,
+    arousal: smoothedArousal,
+    confidence: Number(incoming.confidence) || scores[topEmotion(scores)] || 0,
+    provider: incoming.provider || 'vit_fer',
+    model: incoming.model || '',
+    at: incoming.at || Date.now(),
+    error: incoming.error || '',
+  };
+}
+
+// —— 面部情绪：ViT-FER（后端）；模型未就绪时不伪造情绪分数。
+function markFaceEmotionError(faceId, error, now = Date.now()) {
+  state.emotion.faces[faceId] = {
+    emotion: '', scores: {}, valence: 0, arousal: 0, confidence: 0,
+    provider: 'vit_fer', model: '', at: now, error: error || 'not_ready',
+  };
+}
+
+function updateMultiFaceEmotion() {
+  const faces = state.trackedFaces.filter(face => {
+    if (face.cropQuality === 'good' || face.cropQuality === 'ok') return true;
+    return face.source === 'insightface' && (face.ifDetScore || 0) >= 0.5;
+  });
+  if (!faces.length) return;
+  const now = Date.now();
+  const interval = faces.length > 1 ? 2100 : 950;
+  if (now - state.emotion.lastFaceAt < interval) return;
+  if (state.emotion.faceInFlight) return;
+
+  const crops = faces.map(face => ({
+    faceId: face.trackId || face.id,
+    faceCrop: captureFaceCropFromBbox(face.bboxNorm, { forEnroll: true }),
+  })).filter(item => item.faceCrop);
+
+  if (state.emotion.faceReady && state.serverOnline && crops.length >= 2) {
+    state.emotion.faceInFlight = true;
+    state.emotion.lastFaceAt = now;
+    fetchJsonWithTimeout('/api/emotion/faces', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ crops }),
+    }, 25000)
+      .then(data => {
+        const results = Array.isArray(data.faces) ? data.faces : [];
+        results.forEach(item => {
+          if (!item.ok || !item.scores || !item.faceId) return;
+          storeFaceEmotion(item.faceId, {
+            scores: item.scores,
+            valence: item.valence,
+            arousal: item.arousal,
+            emotion: item.emotion,
+            confidence: item.confidence,
+            provider: item.provider || 'vit_fer',
+            model: item.model || '',
+            at: Date.now(),
+            error: '',
+          });
+        });
+        syncPrimaryFaceEmotionToPanel();
+        fuseEmotion();
+      })
+      .catch(error => {
+        faces.forEach(face => markFaceEmotionError(
+          face.trackId || face.id,
+          error?.name === 'AbortError' ? 'FER timeout' : (error?.message || 'fetch_failed'),
+          now,
+        ));
+        syncPrimaryFaceEmotionToPanel();
+        fuseEmotion();
+      })
+      .finally(() => { state.emotion.faceInFlight = false; });
+    return;
+  }
+
+  const index = state.emotion.faceEmotionIndex % faces.length;
+  state.emotion.faceEmotionIndex += 1;
+  const target = faces[index];
+  const faceCrop = crops.find(item => item.faceId === (target.trackId || target.id))?.faceCrop
+    || captureFaceCropFromBbox(target.bboxNorm, { forEnroll: true });
+  if (!faceCrop) {
+    markFaceEmotionError(target.trackId || target.id, 'crop_failed', now);
+    syncPrimaryFaceEmotionToPanel();
+    fuseEmotion();
+    return;
+  }
+
+  if (state.emotion.faceReady && state.serverOnline) {
+    state.emotion.faceInFlight = true;
+    state.emotion.lastFaceAt = now;
+    fetchJsonWithTimeout('/api/emotion/face', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ faceCrop, faceId: target.id }),
+    }, 15000)
+      .then(data => {
+        if (data.ok && data.scores) {
+          storeFaceEmotion(target.trackId || target.id, {
+            scores: data.scores,
+            valence: data.valence,
+            arousal: data.arousal,
+            emotion: data.emotion,
+            confidence: data.confidence,
+            provider: data.provider || 'vit_fer',
+            model: data.model || '',
+            at: Date.now(),
+            error: '',
+          });
+        } else {
+          markFaceEmotionError(target.trackId || target.id, data.error || 'not_ready', now);
+        }
+        syncPrimaryFaceEmotionToPanel();
+        fuseEmotion();
+      })
+      .catch(error => {
+        markFaceEmotionError(
+          target.trackId || target.id,
+          error?.name === 'AbortError' ? 'FER timeout' : (error?.message || 'fetch_failed'),
+          now,
+        );
+        syncPrimaryFaceEmotionToPanel();
+        fuseEmotion();
+      })
+      .finally(() => { state.emotion.faceInFlight = false; });
+    return;
+  }
+
+  state.emotion.lastFaceAt = now;
+  if (!state.emotion.faceReady || !state.serverOnline) {
+    faces.forEach(face => markFaceEmotionError(face.trackId || face.id, 'model_not_ready', now));
+    syncPrimaryFaceEmotionToPanel();
+    fuseEmotion();
+  }
+}
+
+function syncPrimaryFaceEmotionToPanel() {
+  const primary = state.trackedFaces.find(face => face.id === state.primaryFaceId);
+  const primaryEmotion = primary
+    ? (state.emotion.faces[primary.trackId] || state.emotion.faces[primary.id])
+    : null;
+  if (primaryEmotion) {
+    state.emotion.face = { ...primaryEmotion };
+  }
+}
+
+function markVoiceEmotionError(error, now = Date.now()) {
+  state.emotion.voice = {
+    emotion: '', scores: {}, valence: 0, arousal: 0, confidence: 0,
+    provider: 'wavlm_ser', model: '', at: now, error: error || 'not_ready',
+  };
+  fuseEmotion();
+}
+
+function updateFaceEmotion() {
+  updateMultiFaceEmotion();
+}
+
+// —— 语音情绪：WavLM SER（后端）；失败时不伪造情绪分数。
+function updateVoiceEmotion() {
+  if (!state.emotion.voiceSampling || !state.audioStream) return;
+  const now = Date.now();
+  if (state.emotion.voiceInFlight && now - state.emotion.lastVoiceAt > 8000) {
+    state.emotion.voiceInFlight = false;
+    markVoiceEmotionError('SER timeout', now);
+  }
+  if (now - state.emotion.lastVoiceAt < 6000) return;
+  if (state.emotion.voiceReady && state.serverOnline) {
+    if (state.emotion.voiceInFlight) return;
+    state.emotion.voiceInFlight = true;
+    state.emotion.lastVoiceAt = now;
+    state.emotion.voice = { ...state.emotion.voice, at: now, error: 'SER sampling...' };
+    fuseEmotion();
+    recordVoiceSample()
+      .then(audio => fetchJsonWithTimeout('/api/emotion/voice', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ audio }),
+      }, 60000))
+      .then(data => {
+        if (data.ok && data.scores) {
+          const scores = normScores(data.scores);
+          const [valence, arousal] = data.valence != null && data.arousal != null
+            ? [Number(data.valence), Number(data.arousal)]
+            : scoresToVA(scores);
+          state.emotion.voice = {
+            emotion: canonEmotion(data.emotion || topEmotion(scores)),
+            scores, valence, arousal,
+            confidence: Number(data.confidence) || scores[topEmotion(scores)] || 0,
+            provider: data.provider || 'wavlm_ser', model: data.model || '', at: Date.now(), error: '',
+          };
+          fuseEmotion();
+        } else {
+          const err = [data.error || 'not_ready', data.detail || data.stderr].filter(Boolean).join(': ');
+          markVoiceEmotionError(err);
+        }
+      })
+      .catch(error => {
+        markVoiceEmotionError(error?.name === 'AbortError' ? 'SER timeout' : (error?.message || 'fetch_failed'));
+      })
+      .finally(() => { state.emotion.voiceInFlight = false; });
+    return;
+  }
+  state.emotion.lastVoiceAt = now;
+  markVoiceEmotionError('model_not_ready', now);
+}
+
+function diarizationSpeakerClass(speaker) {
+  const key = String(speaker || 'S1');
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) hash = (hash + key.charCodeAt(i) * (i + 1)) % 997;
+  return `dia-spk-${hash % 6}`;
+}
+
+// 任务2：pyannote 3.1 说话人 diarization（无 energy VAD）。
+function renderDiarization() {
+  if (!elements.diarizationStatus && !elements.diarizationSegments) return;
+  const dia = state.diarization;
+  const providerLabel = dia.ready ? 'pyannote 3.1' : 'pyannote 未就绪';
+  const speakerText = dia.speakerEstimate > 0 ? `${dia.speakerEstimate} 人` : '—';
+  const segCount = dia.segments.length;
+  const primaryTrack = state.trackedFaces.find(face => face.id === state.primaryFaceId);
+  const faceLink = state.voice > 18 && primaryTrack
+    ? `语音活动 · 主脸 T${String(primaryTrack.trackId || primaryTrack.id).slice(-4)}`
+    : '';
+  const multiHint = dia.speakerEstimate > 1 && state.trackedFaces.length > 1
+    ? `${dia.speakerEstimate} 说话人 · ${state.trackedFaces.length} 张脸`
+    : '';
+  if (elements.diarizationStatus) {
+    elements.diarizationStatus.textContent = [
+      providerLabel,
+      dia.ready ? (dia.busy ? '分析中…' : '等待语音片段') : (dia.backendDetail || '配置 PYANNOTE_HF_TOKEN'),
+      `段数 ${segCount}`,
+      `说话人 ${speakerText}`,
+      faceLink,
+      multiHint,
+    ].filter(Boolean).join(' · ');
+  }
+  if (elements.diarizationSegments) {
+    if (!segCount) {
+      elements.diarizationSegments.innerHTML = `<p class="dia-empty">${dia.ready ? '等待 pyannote 分析结果…' : 'pyannote 未配置，见 .env.example 统一安装'}</p>`;
+      return;
+    }
+    const windowMs = 30000;
+    const recent = dia.segments.slice(-10);
+    elements.diarizationSegments.innerHTML = recent.map(seg => {
+      const dur = seg.durationMs || Math.max(0, (seg.endMs || 0) - (seg.startMs || 0));
+      const width = Math.min(100, Math.max(8, (dur / windowMs) * 100));
+      const speaker = escapeHtml(String(seg.speaker || 'S?'));
+      const spkClass = diarizationSpeakerClass(seg.speaker);
+      return `
+        <div class="dia-seg ${spkClass}" title="${speaker} · ${dur}ms · pyannote">
+          <span class="dia-speaker">${speaker}</span>
+          <i style="width:${width}%"></i>
+          <em>${Math.round(dur / 100) / 10}s</em>
+        </div>
+      `;
+    }).join('');
+  }
+}
+
+async function updatePyannoteDiarization() {
+  if (!state.audioStream || !state.serverOnline || state.diarization.busy) return;
+  if (!state.diarization.ready) {
+    renderDiarization();
+    return;
+  }
+  if (state.voice < 12) return;
+  state.diarization.busy = true;
+  try {
+    const audio = await recordVoiceSample();
+    if (!audio) return;
+    const data = await fetchJsonWithTimeout('/api/audio/diarize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audio }),
+    }, 60000);
+    if (data.ok) {
+      state.diarization.provider = 'pyannote_3.1';
+      state.diarization.speakerEstimate = Number(data.speakerCount || data.speaker_count || 0);
+      if (Array.isArray(data.segments) && data.segments.length) {
+        state.diarization.segments = data.segments.slice(-12);
+      }
+      state.diarization.lastAt = Date.now();
+    } else {
+      addEvent('pyannote 未就绪', data.detail || data.error || 'diarization_failed');
+    }
+    renderDiarization();
+  } catch {
+    // non-blocking
+  } finally {
+    state.diarization.busy = false;
+  }
+}
+
+async function supplementInsightFaceDetections() {
+  if (!state.insightfaceReady || !state.serverOnline || !state.started) return;
+  const now = Date.now();
+  const interval = state.debug?.insightfaceOverlay ? 4000 : 5000;
+  if (now - state.lastInsightfaceDetectAt < interval || state.insightfaceDetectInFlight) return;
+  if (elements.video.readyState < 2) return;
+  state.insightfaceDetectInFlight = true;
+  state.lastInsightfaceDetectAt = now;
+  try {
+    const frame = captureVideoFrame();
+    const data = await fetchJsonWithTimeout('/api/identity/face/detect-frame', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ frame }),
+    }, 20000);
+    if (data.ok && Array.isArray(data.faces)) {
+      state.insightfaceDetections = data.faces.map(face => ({
+        bboxNorm: face.bboxNorm,
+        detScore: face.detScore,
+        faceIndex: face.faceIndex,
+      }));
+    }
+  } catch {
+    // non-blocking
+  } finally {
+    state.insightfaceDetectInFlight = false;
+  }
+}
+
+// 任务1：多人脸 FER 聚合后参与 MDAT。
+function aggregateMultiFaceEmotion(now) {
+  const entries = Object.values(state.emotion.faces).filter(item =>
+    item.at && now - item.at < 10000 && Object.keys(item.scores || {}).length
+  );
+  if (!entries.length) return null;
+  if (entries.length === 1) return entries[0];
+  const scores = {};
+  let totalW = 0;
+  let valence = 0;
+  let arousal = 0;
+  entries.forEach(item => {
+    const w = 0.35 + 0.65 * (item.confidence || 0);
+    totalW += w;
+    valence += (item.valence || 0) * w;
+    arousal += (item.arousal || 0) * w;
+    Object.entries(item.scores).forEach(([label, prob]) => {
+      scores[label] = (scores[label] || 0) + prob * w;
+    });
+  });
+  if (totalW <= 0) return entries[0];
+  Object.keys(scores).forEach(key => { scores[key] = Number((scores[key] / totalW).toFixed(4)); });
+  return {
+    emotion: topEmotion(scores),
+    scores,
+    valence: Number((valence / totalW).toFixed(4)),
+    arousal: Number((arousal / totalW).toFixed(4)),
+    confidence: Math.max(...entries.map(item => item.confidence || 0)),
+    provider: entries[0].provider,
+    model: entries[0].model,
+    at: Math.max(...entries.map(item => item.at)),
+    multiFaceCount: entries.length,
+  };
+}
+
+function fuseMdatScores(faceScores, voiceScores, wFace, wVoice) {
+  const labels = new Set([
+    ...Object.keys(faceScores || {}),
+    ...Object.keys(voiceScores || {}),
+  ]);
+  if (!labels.size) return { neutral: 1 };
+  let agreement = 0;
+  labels.forEach(label => {
+    agreement += (faceScores?.[label] || 0) * (voiceScores?.[label] || 0);
+  });
+  const raw = {};
+  labels.forEach(label => {
+    const f = faceScores?.[label] || 0;
+    const v = voiceScores?.[label] || 0;
+    raw[label] = wFace * f + wVoice * v + 0.55 * f * v * (1 + agreement);
+  });
+  return normScores(raw);
+}
+
+function fuseEmotion() {
+  const emotion = state.emotion;
+  const now = Date.now();
+  const aggregatedFace = aggregateMultiFaceEmotion(now);
+  const face = aggregatedFace || emotion.face;
+  const voice = emotion.voice;
+  const faceFresh = face.at && now - face.at < 8000 && Object.keys(face.scores || {}).length;
+  const voiceFresh = voice.at && now - voice.at < 14000 && Object.keys(voice.scores || {}).length;
+  let wFace = faceFresh ? 0.58 * (0.35 + 0.65 * (face.confidence || 0)) : 0;
+  let wVoice = voiceFresh ? 0.42 * (0.35 + 0.65 * (voice.confidence || 0)) : 0;
+
+  emotion.fusionNote = aggregatedFace?.multiFaceCount > 1
+    ? `MDAT · ${aggregatedFace.multiFaceCount} 脸聚合后融合`
+    : 'MDAT 跨模态融合';
+
+  let fusedScores = { neutral: 1 };
+  if (wFace + wVoice > 0) {
+    fusedScores = fuseMdatScores(face.scores || {}, voice.scores || {}, wFace, wVoice);
+  }
+
+  const vaWeight = wFace + wVoice;
+  let valence = 0;
+  let arousal = 0;
+  if (vaWeight > 0) {
+    valence = (wFace * (face.valence || 0) + wVoice * (voice.valence || 0)) / vaWeight;
+    arousal = (wFace * (face.arousal || 0) + wVoice * (voice.arousal || 0)) / vaWeight;
+  }
+  const top = topEmotion(fusedScores);
+  emotion.fused = {
+    emotion: top,
+    scores: fusedScores,
+    valence: Number(valence.toFixed(3)),
+    arousal: Number(arousal.toFixed(3)),
+    confidence: Number((fusedScores[top] || 0).toFixed(3)),
+    fusion: 'mdat',
+  };
+  if (aggregatedFace) emotion.face = { ...aggregatedFace };
+  renderEmotion();
+}
+
+// 在 1.2s 推理节拍里采样一次，保证时间线/轨迹连续。
+function sampleEmotionHistory() {
+  const fused = state.emotion.fused;
+  state.emotion.history.push({ t: Date.now(), v: fused.valence, a: fused.arousal, emotion: fused.emotion, c: fused.confidence });
+  if (state.emotion.history.length > 150) state.emotion.history.shift();
+}
+
+function emotionIsFresh() {
+  const now = Date.now();
+  return (state.emotion.face.at && now - state.emotion.face.at < 10000)
+    || (state.emotion.voice.at && now - state.emotion.voice.at < 16000);
+}
+
+function renderEmotion() {
+  const emotion = state.emotion;
+  const fused = emotion.fused;
+  const fresh = emotionIsFresh();
+  const color = EMOTION_COLOR[fused.emotion] || '#bfb4aa';
+  const arousalNorm = clamp01((fused.arousal + 1) / 2);
+
+  // 把融合情绪广播成全局 CSS 变量：颜色 / 光晕强度 / 脉冲速度（唤醒度越高越快）。
+  const root = document.documentElement;
+  root.style.setProperty('--emo-color', color);
+  root.style.setProperty('--emo-glow', fresh ? (0.22 + 0.5 * arousalNorm).toFixed(2) : '0');
+  root.style.setProperty('--emo-pulse', fresh ? `${(2.8 - arousalNorm * 1.7).toFixed(2)}s` : '4s');
+
+  // 融合环
+  if (elements.emoRingArc) {
+    const radius = 52;
+    const circumference = 2 * Math.PI * radius;
+    const conf = fresh ? clamp01(fused.confidence) : 0;
+    const arcLength = conf * circumference;
+    elements.emoRingArc.setAttribute('stroke', color);
+    elements.emoRingArc.setAttribute('stroke-width', String(6 + arousalNorm * 7));
+    elements.emoRingArc.setAttribute('stroke-dasharray', `${arcLength.toFixed(2)} ${(circumference - arcLength).toFixed(2)}`);
+    if (elements.emoRingEmoji) elements.emoRingEmoji.textContent = fresh ? (EMOTION_EMOJI[fused.emotion] || '🙂') : '⏳';
+    if (elements.emoRingLabel) elements.emoRingLabel.textContent = fresh ? (EMOTION_LABEL_ZH[fused.emotion] || fused.emotion) : '采集中';
+    if (elements.emoRingConf) elements.emoRingConf.textContent = fresh ? `${Math.round(conf * 100)}%` : '—';
+  }
+
+  // valence-arousal 平面（viewBox 0 0 200 200，中心 100,100，单位 80px）
+  if (elements.emoVADot) {
+    const x = 100 + clampNum(fused.valence, -1, 1) * 80;
+    const y = 100 - clampNum(fused.arousal, -1, 1) * 80;
+    elements.emoVADot.setAttribute('cx', x.toFixed(1));
+    elements.emoVADot.setAttribute('cy', y.toFixed(1));
+    elements.emoVADot.setAttribute('fill', color);
+    elements.emoVADot.setAttribute('opacity', fresh ? '1' : '0.3');
+    if (elements.emoVAHalo) {
+      elements.emoVAHalo.setAttribute('cx', x.toFixed(1));
+      elements.emoVAHalo.setAttribute('cy', y.toFixed(1));
+      elements.emoVAHalo.setAttribute('fill', color);
+      elements.emoVAHalo.setAttribute('opacity', fresh ? (0.16 + 0.24 * arousalNorm).toFixed(2) : '0');
+    }
+  }
+  if (elements.emoVATrail) {
+    // 彗星拖尾：越新的点越靠后；用渐隐的紫色轨迹。
+    const points = emotion.history.slice(-26).map(item => `${(100 + clampNum(item.v, -1, 1) * 80).toFixed(1)},${(100 - clampNum(item.a, -1, 1) * 80).toFixed(1)}`).join(' ');
+    elements.emoVATrail.setAttribute('points', points);
+  }
+
+  // 时间线（viewBox 0 0 240 60，中线 30，幅度 24），曲线 + 渐变填充。
+  const history = emotion.history.slice(-60);
+  if (elements.emoTLValence && elements.emoTLArousal) {
+    const n = history.length;
+    const seriesPoints = key => history.map((item, index) => {
+      const px = n > 1 ? (index / (n - 1)) * 240 : 0;
+      const py = 30 - clampNum(item[key], -1, 1) * 24;
+      return `${px.toFixed(1)},${py.toFixed(1)}`;
+    });
+    const valPts = seriesPoints('v');
+    const aroPts = seriesPoints('a');
+    elements.emoTLValence.setAttribute('points', valPts.join(' '));
+    elements.emoTLArousal.setAttribute('points', aroPts.join(' '));
+    const lastX = n > 1 ? 240 : 0;
+    const areaFor = pts => pts.length ? `0,30 ${pts.join(' ')} ${lastX},30` : '';
+    if (elements.emoTLValenceArea) elements.emoTLValenceArea.setAttribute('points', areaFor(valPts));
+    if (elements.emoTLArousalArea) elements.emoTLArousalArea.setAttribute('points', areaFor(aroPts));
+  }
+
+  // 双模态行
+  if (elements.emoFaceRow) {
+    const multiCount = Object.keys(emotion.faces).length;
+    const multiNote = multiCount > 1 ? ` · ${multiCount} 脸` : '';
+    elements.emoFaceRow.innerHTML = modalityRowHtml(`面部 FER${multiNote}`, emotion.face, emotion.faceReady);
+  }
+  if (elements.emoVoiceRow) elements.emoVoiceRow.innerHTML = modalityRowHtml('语音 SER', emotion.voice, emotion.voiceReady);
+  renderMultiFaceEmotionList();
+
+  if (elements.emotionStatus) {
+    const parts = [];
+    parts.push(`融合：${fresh ? (EMOTION_LABEL_ZH[fused.emotion] || fused.emotion) : '采集中'} · val ${fused.valence} · aro ${fused.arousal}`);
+    if (emotion.fusionNote) parts.push(emotion.fusionNote);
+    parts.push('MDAT');
+    parts.push(emotion.policyNote || '情绪信号尚未参与策略');
+    elements.emotionStatus.textContent = parts.join(' — ');
+  }
+}
+
+function clampNum(value, min, max) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return Math.min(max, Math.max(min, num));
+}
+
+function providerLabelEmotion(provider) {
+  const map = {
+    vit_fer: 'ViT-FER',
+    wavlm_ser: 'WavLM · SER',
+  };
+  return map[provider] || provider || '未运行';
+}
+
+function emotionScoresHtml(scores) {
+  const order = ['neutral', 'happy', 'sad', 'angry', 'fear', 'surprise', 'disgust', 'contempt'];
+  const entries = order
+    .filter(label => scores && scores[label] != null)
+    .map(label => [label, Number(scores[label]) || 0]);
+  if (!entries.length) return '';
+  return `<div class="emo-score-grid">${entries.map(([label, value]) => `
+    <div class="emo-score-row">
+      <span>${escapeHtml(EMOTION_LABEL_ZH[label] || label)}</span>
+      <i><b style="width:${Math.round(value * 100)}%"></b></i>
+      <em>${Math.round(value * 100)}%</em>
+    </div>
+  `).join('')}</div>`;
+}
+
+function renderMultiFaceEmotionList() {
+  if (!elements.emoMultiFaceList) return;
+  const tracked = state.trackedFaces.filter(face => face.trackId || face.id);
+  if (tracked.length < 2) {
+    elements.emoMultiFaceList.innerHTML = '';
+    return;
+  }
+  const now = Date.now();
+  const rows = tracked.map(face => {
+    const key = face.trackId || face.id;
+    const emo = state.emotion.faces[key];
+    const match = state.multiFaceMatches[key];
+    const person = match?.personId ? state.people.find(item => item.id === match.personId) : null;
+    const name = person?.name || `T${String(key).slice(-4)}`;
+    const fresh = emo?.at && now - emo.at < 12000;
+    const hasError = Boolean(emo?.error);
+    const badge = !emo ? '—' : (hasError ? '未就绪' : 'real');
+    const label = fresh && emo?.emotion ? (EMOTION_LABEL_ZH[emo.emotion] || emo.emotion) : '采集中';
+    const conf = fresh ? Math.round((emo.confidence || 0) * 100) : 0;
+    const src = face.source === 'fused' ? 'IF+MP' : (face.source === 'insightface' ? 'IF' : 'MP');
+    return `
+      <div class="emo-multi-row">
+        <span class="emo-multi-name">${escapeHtml(name)}</span>
+        <span class="emo-multi-src">${src}</span>
+        <span class="emo-multi-emo">${escapeHtml(label)}</span>
+        <span class="emo-multi-conf">${conf ? `${conf}%` : '—'}</span>
+        <span class="emo-multi-badge ${hasError ? 'warn' : 'ok'}">${badge}</span>
+      </div>
+    `;
+  }).join('');
+  elements.emoMultiFaceList.innerHTML = `
+    <p class="emo-multi-title">多人脸 FER（按 track）</p>
+    ${rows}
+  `;
+}
+
+function modalityRowHtml(title, modality, ready) {
+  const fresh = modality.at && Date.now() - modality.at < 16000 && !modality.error && modality.emotion;
+  const isSampling = /sampling\.\.\.$/.test(modality.error || '');
+  const emotionLabel = modality.emotion ? (EMOTION_LABEL_ZH[modality.emotion] || modality.emotion) : '—';
+  const conf = Math.round((modality.confidence || 0) * 100);
+  const errNote = modality.error && !isSampling ? ` · ${escapeHtml(modality.error)}` : '';
+  const badge = !ready
+    ? '<span class="emo-badge warn">模型未就绪</span>'
+    : (modality.error && !isSampling
+      ? '<span class="emo-badge warn">未就绪</span>'
+      : '<span class="emo-badge ok">real</span>');
+  return `
+    <div class="emo-modality-head">
+      <strong>${title}</strong>
+      ${badge}
+    </div>
+    <div class="emo-modality-body">
+      <span class="emo-modality-emotion">${fresh ? escapeHtml(emotionLabel) : '采集中'}</span>
+      <div class="emo-bar"><i style="width:${fresh ? conf : 0}%"></i></div>
+      <span class="emo-modality-conf">${fresh ? conf + '%' : '—'}</span>
+    </div>
+    <p class="emo-modality-meta">${escapeHtml(providerLabelEmotion(modality.provider))}${escapeHtml(modality.model ? ' · ' + modality.model : '')}${errNote}</p>
+    ${emotionScoresHtml(modality.scores)}
+  `;
+}
+
+if (elements.voiceEmotionToggle) {
+  const syncVoiceToggle = () => {
+    elements.voiceEmotionToggle.textContent = `语音情绪采样：${state.emotion.voiceSampling ? '开' : '关'}`;
+    elements.voiceEmotionToggle.classList.toggle('ghost', !state.emotion.voiceSampling);
+  };
+  syncVoiceToggle();
+  elements.voiceEmotionToggle.addEventListener('click', () => {
+    state.emotion.voiceSampling = !state.emotion.voiceSampling;
+    localStorage.setItem('hri-demo-voice-emotion', JSON.stringify(state.emotion.voiceSampling));
+    syncVoiceToggle();
+    addEvent('语音情绪采样', state.emotion.voiceSampling
+      ? '已开启：说话时会上传约 3 秒音频做情绪识别，结果与 provider 在面板可见。'
+      : '已关闭：不再采集语音情绪。');
+  });
+}
 
 function buildInteractionSnapshot() {
   const person = activePerson();
@@ -2402,6 +4416,16 @@ function buildInteractionSnapshot() {
     } : null,
     interactionState: state.interactionState,
     confidence: Math.round(state.confidence * 100),
+    affect: emotionIsFresh() ? {
+      emotion: state.emotion.fused.emotion,
+      emotionZh: EMOTION_LABEL_ZH[state.emotion.fused.emotion] || state.emotion.fused.emotion,
+      valence: state.emotion.fused.valence,
+      arousal: state.emotion.fused.arousal,
+      confidence: Math.round(state.emotion.fused.confidence * 100),
+      face: { emotion: state.emotion.face.emotion, provider: state.emotion.face.provider, confidence: Math.round((state.emotion.face.confidence || 0) * 100) },
+      voice: { emotion: state.emotion.voice.emotion, provider: state.emotion.voice.provider, confidence: Math.round((state.emotion.voice.confidence || 0) * 100) },
+      note: state.emotion.policyNote,
+    } : null,
     readiness: Math.round(state.readiness),
     arousal: Math.round(state.arousal),
     energy: Math.round(state.energy),
@@ -2638,3 +4662,4 @@ pingServer();
 setInterval(pingServer, 15000);
 renderPeople();
 renderConversation();
+renderEmotion();
